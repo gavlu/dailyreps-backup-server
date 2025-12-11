@@ -47,12 +47,12 @@ pub async fn delete_user(
 ) -> Result<Json<DeleteUserResponse>> {
     // 1. Validate user ID and storage key formats
     if !User::validate_id(&payload.user_id) {
-        return Err(AppError::InvalidInput(
-            "Invalid user ID format".to_string(),
-        ));
+        return Err(AppError::InvalidInput("Invalid user ID format".to_string()));
     }
 
-    if payload.storage_key.len() != 64 || !payload.storage_key.chars().all(|c| c.is_ascii_hexdigit()) {
+    if payload.storage_key.len() != 64
+        || !payload.storage_key.chars().all(|c| c.is_ascii_hexdigit())
+    {
         return Err(AppError::InvalidInput(
             "Invalid storage key format".to_string(),
         ));
@@ -60,7 +60,11 @@ pub async fn delete_user(
 
     // 2. Verify HMAC signature
     // Use storageKey as the signed data to prove ownership
-    if !verify_hmac(&payload.storage_key, &payload.signature, &state.config.app_secret_key) {
+    if !verify_hmac(
+        &payload.storage_key,
+        &payload.signature,
+        &state.config.app_secret_key,
+    ) {
         tracing::warn!(
             "Invalid HMAC signature for user deletion: {}",
             payload.user_id

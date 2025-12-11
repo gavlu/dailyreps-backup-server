@@ -25,13 +25,14 @@ impl RateLimitRecord {
             backups_this_hour: 0,
             backups_today: 0,
             last_backup_at: None,
-            hour_reset_at: now + 3600,  // 1 hour from now
-            day_reset_at: now + 86400,  // 24 hours from now
+            hour_reset_at: now + 3600, // 1 hour from now
+            day_reset_at: now + 86400, // 24 hours from now
         }
     }
 
     /// Check if rate limits allow a new backup, and update counters if allowed
     /// Returns Ok(()) if allowed, Err(RateLimitExceeded) if not
+    #[allow(clippy::result_large_err)]
     pub fn check_and_increment(&mut self, now: i64) -> Result<()> {
         // Reset counters if time windows have expired
         if now >= self.hour_reset_at {
@@ -144,7 +145,11 @@ mod tests {
             if i > 0 && i as u32 % MAX_BACKUPS_PER_HOUR as u32 == 0 {
                 now += 3601;
             }
-            assert!(record.check_and_increment(now).is_ok(), "Backup {} should succeed", i);
+            assert!(
+                record.check_and_increment(now).is_ok(),
+                "Backup {} should succeed",
+                i
+            );
         }
 
         // Move past hourly reset but not daily

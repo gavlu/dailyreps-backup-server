@@ -27,8 +27,8 @@ impl Config {
             .parse()
             .map_err(|_| "Invalid SERVER_PORT")?;
 
-        let database_path = env::var("DATABASE_PATH")
-            .unwrap_or_else(|_| "./data/dailyreps.db".to_string());
+        let database_path =
+            env::var("DATABASE_PATH").unwrap_or_else(|_| "./data/dailyreps.db".to_string());
 
         let allowed_origins = env::var("ALLOWED_ORIGINS")
             .unwrap_or_else(|_| "http://localhost:5173".to_string())
@@ -56,8 +56,7 @@ impl Config {
             .parse()
             .map_err(|_| "Invalid REGISTER_RATE_LIMIT_WINDOW_SECS")?;
 
-        let environment = env::var("ENVIRONMENT")
-            .unwrap_or_else(|_| "development".to_string());
+        let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
 
         let app_secret_key = env::var("APP_SECRET_KEY")
             .map_err(|_| "APP_SECRET_KEY must be set for HMAC verification")?;

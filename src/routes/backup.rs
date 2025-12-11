@@ -10,7 +10,7 @@ use crate::constants::*;
 use crate::db::tables;
 use crate::error::{AppError, Result};
 use crate::models::{Backup, BackupRecord, RateLimitRecord, User};
-use crate::security::{validate_timestamp, verify_hmac};
+use crate::security::{analyze_backup_data, validate_timestamp, verify_hmac};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -53,21 +53,24 @@ pub struct RetrieveBackupResponse {
 /// 2. HMAC signature: Proves data came from official app
 /// 3. Timestamp validation: Prevents replay attacks
 /// 4. Rate limiting: Max 5/hour, 20/day per user
+/// 5. Compression analysis: Detects anomalous data patterns (entropy check)
 ///
-/// # Future Enhancement: Compression Analysis
-/// The encrypted data format is preserved as base64-encoded AES-GCM output.
-/// Future compression analysis can be added here to detect anomalous data
-/// patterns that don't match expected JSON structure entropy.
+/// # Compression Analysis (Anomaly Detection)
+/// Analyzes the backup envelope format and entropy of encrypted data to detect:
+/// - Non-official clients (missing/wrong appId)
+/// - Random data padding (entropy too high)
+/// - Unencrypted data (entropy too low)
 pub async fn store_backup(
     State(state): State<AppState>,
     Json(payload): Json<StoreBackupRequest>,
 ) -> Result<Json<StoreBackupResponse>> {
     // 1. Verify HMAC signature (proves data from official app)
-    if !verify_hmac(&payload.data, &payload.signature, &state.config.app_secret_key) {
-        tracing::warn!(
-            "Invalid HMAC signature from user {}",
-            payload.user_id
-        );
+    if !verify_hmac(
+        &payload.data,
+        &payload.signature,
+        &state.config.app_secret_key,
+    ) {
+        tracing::warn!("Invalid HMAC signature from user {}", payload.user_id);
         return Err(AppError::InvalidSignature);
     }
 
@@ -101,9 +104,7 @@ pub async fn store_backup(
 
     // 4. Validate user ID and storage key formats
     if !User::validate_id(&payload.user_id) {
-        return Err(AppError::InvalidInput(
-            "Invalid user ID format".to_string(),
-        ));
+        return Err(AppError::InvalidInput("Invalid user ID format".to_string()));
     }
 
     if !Backup::validate_storage_key(&payload.storage_key) {
@@ -112,10 +113,33 @@ pub async fn store_backup(
         ));
     }
 
-    if !Backup::validate_encrypted_data(&payload.data) {
-        return Err(AppError::InvalidInput(
-            "Invalid encrypted data format".to_string(),
-        ));
+    // 5. Compression analysis (anomaly detection)
+    // Validates envelope format and checks entropy of encrypted data
+    let analysis = analyze_backup_data(&payload.data).map_err(AppError::InvalidBackupFormat)?;
+
+    // Log entropy analysis results
+    if analysis.data_size >= MIN_SIZE_FOR_ENTROPY_CHECK {
+        tracing::debug!(
+            "Backup entropy for user {}: {:.3} (size: {} bytes)",
+            payload.user_id,
+            analysis.entropy_ratio,
+            analysis.data_size
+        );
+    }
+
+    // Reject backups that fail entropy check (suspicious patterns)
+    if !analysis.passes_entropy_check {
+        tracing::warn!(
+            "Rejecting backup from user {} due to suspicious entropy: {:.3}",
+            payload.user_id,
+            analysis.entropy_ratio
+        );
+        return Err(AppError::SuspiciousDataPattern);
+    }
+
+    // Log any warnings (for monitoring)
+    if let Some(warning) = &analysis.warning {
+        tracing::info!("Backup warning for user {}: {}", payload.user_id, warning);
     }
 
     let db = state.db.clone();
@@ -128,7 +152,7 @@ pub async fn store_backup(
 
         let write_txn = db.begin_write()?;
         {
-            // 5. Verify user exists
+            // 6. Verify user exists
             let users = write_txn.open_table(tables::USERS)?;
             if users.get(user_id.as_str())?.is_none() {
                 tracing::warn!("Backup attempt for non-existent user: {}", user_id);
@@ -136,7 +160,7 @@ pub async fn store_backup(
             }
             drop(users);
 
-            // 6. Check and update rate limits
+            // 7. Check and update rate limits
             let mut rate_limits = write_txn.open_table(tables::RATE_LIMITS)?;
             let mut rate_record = match rate_limits.get(user_id.as_str())? {
                 Some(bytes) => bincode::deserialize(bytes.value())?,
@@ -150,12 +174,11 @@ pub async fn store_backup(
             rate_limits.insert(user_id.as_str(), rate_bytes.as_slice())?;
             drop(rate_limits);
 
-            // 7. Upsert backup (insert or update if exists)
+            // 8. Upsert backup (insert or update if exists)
             let mut backups = write_txn.open_table(tables::BACKUPS)?;
             let created_at = backups
                 .get(storage_key.as_str())?
-                .map(|b| bincode::deserialize::<BackupRecord>(b.value()).ok())
-                .flatten()
+                .and_then(|b| bincode::deserialize::<BackupRecord>(b.value()).ok())
                 .map(|r| r.created_at)
                 .unwrap_or(now);
 
@@ -169,7 +192,7 @@ pub async fn store_backup(
             backups.insert(storage_key.as_str(), backup_bytes.as_slice())?;
             drop(backups);
 
-            // 8. Update user_backups index (for cascade delete)
+            // 9. Update user_backups index (for cascade delete)
             let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
             let mut keys: Vec<String> = user_backups
                 .get(user_id.as_str())?
@@ -194,8 +217,7 @@ pub async fn store_backup(
         payload_size
     );
 
-    let updated_at_dt = DateTime::from_timestamp(updated_at, 0)
-        .unwrap_or_else(|| Utc::now());
+    let updated_at_dt = DateTime::from_timestamp(updated_at, 0).unwrap_or_else(Utc::now);
 
     Ok(Json(StoreBackupResponse {
         success: true,
@@ -210,9 +232,7 @@ pub async fn retrieve_backup(
 ) -> Result<Json<RetrieveBackupResponse>> {
     // Validate formats
     if !User::validate_id(&params.user_id) {
-        return Err(AppError::InvalidInput(
-            "Invalid user ID format".to_string(),
-        ));
+        return Err(AppError::InvalidInput("Invalid user ID format".to_string()));
     }
 
     if !Backup::validate_storage_key(&params.storage_key) {
@@ -250,8 +270,7 @@ pub async fn retrieve_backup(
         result.encrypted_data.len()
     );
 
-    let updated_at_dt = DateTime::from_timestamp(result.updated_at, 0)
-        .unwrap_or_else(|| Utc::now());
+    let updated_at_dt = DateTime::from_timestamp(result.updated_at, 0).unwrap_or_else(Utc::now);
 
     Ok(Json(RetrieveBackupResponse {
         data: result.encrypted_data,

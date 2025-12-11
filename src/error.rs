@@ -51,6 +51,12 @@ pub enum AppError {
 
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
+
+    #[error("Invalid backup format: {0}")]
+    InvalidBackupFormat(String),
+
+    #[error("Suspicious data pattern detected")]
+    SuspiciousDataPattern,
 }
 
 /// Implement IntoResponse to convert AppError into HTTP responses
@@ -101,6 +107,17 @@ impl IntoResponse for AppError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Rate limit exceeded - too many requests",
             ),
+            AppError::InvalidBackupFormat(ref msg) => {
+                tracing::warn!("Invalid backup format: {}", msg);
+                (StatusCode::BAD_REQUEST, "Invalid backup format")
+            }
+            AppError::SuspiciousDataPattern => {
+                tracing::warn!("Suspicious data pattern detected in backup");
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Backup data failed validation - please use official app",
+                )
+            }
         };
 
         let body = Json(json!({

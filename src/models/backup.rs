@@ -34,19 +34,6 @@ impl Backup {
     pub fn validate_storage_key(key: &str) -> bool {
         key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit())
     }
-
-    /// Validate that encrypted data is valid base64
-    ///
-    /// Note: This is kept for compatibility with future compression analysis.
-    /// The encrypted data from the client should be properly formatted base64
-    /// containing JSON data that was encrypted with AES-GCM.
-    pub fn validate_encrypted_data(data: &str) -> bool {
-        // Basic check: base64 should only contain valid characters
-        // More thorough validation would try to decode it
-        !data.is_empty() && data.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
-        })
-    }
 }
 
 #[cfg(test)]
@@ -62,20 +49,6 @@ mod tests {
         // Invalid length
         let invalid_key = "abc123";
         assert!(!Backup::validate_storage_key(&invalid_key));
-    }
-
-    #[test]
-    fn test_validate_encrypted_data() {
-        // Valid base64
-        let valid_data = "SGVsbG8gV29ybGQ=";
-        assert!(Backup::validate_encrypted_data(valid_data));
-
-        // Empty
-        assert!(!Backup::validate_encrypted_data(""));
-
-        // Invalid base64 characters
-        let invalid_data = "Hello@World!";
-        assert!(!Backup::validate_encrypted_data(invalid_data));
     }
 
     #[test]

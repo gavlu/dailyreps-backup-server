@@ -10,13 +10,11 @@ use crate::AppState;
 pub async fn health_check(State(state): State<AppState>) -> Json<Value> {
     // Check database connectivity by attempting a read transaction
     let db = state.db.clone();
-    let db_status = tokio::task::spawn_blocking(move || {
-        match db.begin_read() {
-            Ok(_) => "connected",
-            Err(e) => {
-                tracing::error!("Database health check failed: {:?}", e);
-                "disconnected"
-            }
+    let db_status = tokio::task::spawn_blocking(move || match db.begin_read() {
+        Ok(_) => "connected",
+        Err(e) => {
+            tracing::error!("Database health check failed: {:?}", e);
+            "disconnected"
         }
     })
     .await

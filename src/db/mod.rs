@@ -10,6 +10,7 @@ pub type Db = Arc<Database>;
 /// Open or create the redb database at the given path
 ///
 /// Creates all required tables on first run.
+#[allow(clippy::result_large_err)]
 pub fn open_database(path: impl AsRef<Path>) -> Result<Db, RedbError> {
     tracing::info!("Opening database at: {:?}", path.as_ref());
 

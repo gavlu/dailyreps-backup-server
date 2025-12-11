@@ -969,12 +969,12 @@ wrk -t2 -c10 -d30s --latency \
    - Optional: Email when backup succeeds/fails
    - Requires email service integration
 
-5. **Compression Analysis for Anomaly Detection**
-   - Detect non-JSON data patterns in encrypted backups
-   - Analyze entropy to identify abuse (random data vs structured JSON)
-   - Add constants when implementing:
-     - `EXPECTED_APP_ID: &str = "dailyreps-app"` - for envelope validation
-     - `PROTOCOL_VERSION: &str = "1.0"` - for versioning backup format
+5. **Compression Analysis for Anomaly Detection** ✅ COMPLETE
+   - ✅ Detect non-JSON data patterns in encrypted backups via envelope validation
+   - ✅ Analyze entropy to identify abuse (low entropy = unencrypted data)
+   - ✅ Added `EXPECTED_APP_ID` constant for envelope validation
+   - ✅ BackupEnvelope struct validates appId and encrypted data
+   - ✅ Shannon entropy calculation flags suspiciously low-entropy data
    - This helps prevent storage abuse from non-official clients
 
 ### Long-term (6-12+ months)
@@ -1109,6 +1109,7 @@ A: Provides more privacy and flexibility. Users can choose any identifier they w
 - [x] Layer 2: Rate limiting (per-user hourly/daily limits)
 - [x] Layer 3: HMAC signatures (proves data from official app)
 - [x] Layer 4: Timestamp validation (prevents replay attacks)
+- [x] Layer 5: Compression analysis (envelope validation + entropy check)
 - [x] Constants module for all limits
 - [x] Security module for cryptographic verification
 
@@ -1144,7 +1145,7 @@ A: Provides more privacy and flexibility. Users can choose any identifier they w
 - [ ] Backup versioning (keep last 10 versions)
 - [ ] Usage metrics dashboard
 - [ ] Email notifications (optional)
-- [ ] Compression analysis for anomaly detection
+- [x] Compression analysis for anomaly detection ✅
 - [ ] Per-user storage quotas
 - [ ] HMAC authentication tags on encrypted data
 
@@ -1177,6 +1178,7 @@ A: Provides more privacy and flexibility. Users can choose any identifier they w
 | Error message sanitization | No internal details leaked | ✅ |
 | Structured logging | All actions logged securely | ✅ |
 | Cascading deletes | User deletion removes all data | ✅ |
+| Compression analysis | Envelope validation + entropy check | ✅ |
 
 ---
 
