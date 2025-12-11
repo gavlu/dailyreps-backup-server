@@ -37,6 +37,7 @@ fn test_config() -> dailyreps_backup_server::Config {
         register_rate_limit_window_secs: 60,
         environment: "test".to_string(),
         app_secret_key: TEST_SECRET.to_string(),
+        admin_secret_key: None,
     }
 }
 
@@ -859,4 +860,127 @@ async fn test_backup_update_replaces_data() {
 
     let body = body_to_json(response.into_body()).await;
     assert_eq!(body["data"], data2);
+}
+
+// =============================================================================
+// Admin Endpoint Tests
+// =============================================================================
+
+const TEST_ADMIN_SECRET: &str = "test-admin-secret";
+
+/// Create a test config with admin key enabled
+fn test_config_with_admin() -> dailyreps_backup_server::Config {
+    dailyreps_backup_server::Config {
+        server_host: "127.0.0.1".to_string(),
+        server_port: 0,
+        database_path: "".to_string(),
+        allowed_origins: vec!["http://localhost:5173".to_string()],
+        rate_limit_requests: 100,
+        rate_limit_window_secs: 60,
+        register_rate_limit_requests: 10,
+        register_rate_limit_window_secs: 60,
+        environment: "test".to_string(),
+        app_secret_key: TEST_SECRET.to_string(),
+        admin_secret_key: Some(TEST_ADMIN_SECRET.to_string()),
+    }
+}
+
+/// Create a test app with admin endpoint enabled
+fn create_test_app_with_admin(db: Arc<Database>, db_path: String) -> Router {
+    use dailyreps_backup_server::routes::*;
+
+    let mut config = test_config_with_admin();
+    config.database_path = db_path;
+    let state = dailyreps_backup_server::AppState { db, config };
+
+    Router::new()
+        .route("/health", get(health_check))
+        .route("/api/register", post(register_user))
+        .route("/api/backup", post(store_backup).get(retrieve_backup))
+        .route("/api/user", delete(delete_user))
+        .route("/admin/stats", get(admin_stats))
+        .with_state(state)
+}
+
+#[tokio::test]
+async fn test_admin_stats_success() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.db");
+    let db = Database::create(&db_path).expect("Failed to create test database");
+
+    // Initialize tables
+    let write_txn = db.begin_write().unwrap();
+    {
+        use dailyreps_backup_server::db::tables;
+        let _ = write_txn.open_table(tables::USERS).unwrap();
+        let _ = write_txn.open_table(tables::BACKUPS).unwrap();
+        let _ = write_txn.open_table(tables::RATE_LIMITS).unwrap();
+        let _ = write_txn.open_table(tables::USER_BACKUPS).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let db = Arc::new(db);
+    let app = create_test_app_with_admin(db, db_path.to_string_lossy().to_string());
+
+    let uri = format!("/admin/stats?key={}", TEST_ADMIN_SECRET);
+    let response = app.oneshot(make_get_request(&uri)).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = body_to_json(response.into_body()).await;
+    assert_eq!(body["user_count"], 0);
+    assert_eq!(body["backup_count"], 0);
+    assert!(body["database_size_bytes"].as_u64().is_some());
+    assert!(body["database_size_human"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_admin_stats_invalid_key() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.db");
+    let db = Database::create(&db_path).expect("Failed to create test database");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        use dailyreps_backup_server::db::tables;
+        let _ = write_txn.open_table(tables::USERS).unwrap();
+        let _ = write_txn.open_table(tables::BACKUPS).unwrap();
+        let _ = write_txn.open_table(tables::RATE_LIMITS).unwrap();
+        let _ = write_txn.open_table(tables::USER_BACKUPS).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let db = Arc::new(db);
+    let app = create_test_app_with_admin(db, db_path.to_string_lossy().to_string());
+
+    let response = app
+        .oneshot(make_get_request("/admin/stats?key=wrong-key"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_admin_stats_disabled_without_key() {
+    let temp_dir = TempDir::new().unwrap();
+    let db = create_test_db(&temp_dir);
+
+    // Use standard test app (no admin key configured)
+    use dailyreps_backup_server::routes::*;
+
+    let config = test_config();
+    let state = dailyreps_backup_server::AppState { db, config };
+
+    let app = Router::new()
+        .route("/admin/stats", get(admin_stats))
+        .with_state(state);
+
+    let response = app
+        .oneshot(make_get_request("/admin/stats?key=any-key"))
+        .await
+        .unwrap();
+
+    // Should return unauthorized because admin_secret_key is None
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }

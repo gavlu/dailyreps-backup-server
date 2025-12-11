@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/register", post(register_user))
         .route("/api/backup", post(store_backup).get(retrieve_backup))
         .route("/api/user", delete(delete_user))
+        .route("/admin/stats", get(admin_stats))
         .layer(cors)
         .with_state(state);
 

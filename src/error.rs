@@ -53,6 +53,9 @@ pub enum AppError {
 
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
+
+    #[error("Unauthorized")]
+    Unauthorized,
 }
 
 /// Implement IntoResponse to convert AppError into HTTP responses
@@ -107,6 +110,7 @@ impl IntoResponse for AppError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Rate limit exceeded - too many requests",
             ),
+            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized"),
         };
 
         let body = Json(json!({

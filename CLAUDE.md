@@ -73,6 +73,7 @@ dailyreps-backup-server/
 │   ├── security.rs          # HMAC verification, timestamp validation
 │   ├── routes/
 │   │   ├── mod.rs           # Route module exports
+│   │   ├── admin.rs         # Admin diagnostics endpoint
 │   │   ├── health.rs        # Health check endpoint
 │   │   ├── register.rs      # User registration
 │   │   ├── backup.rs        # Backup storage/retrieval
@@ -276,6 +277,29 @@ Health check endpoint for monitoring.
 }
 ```
 
+### GET /admin/stats?key=...
+Admin endpoint for database diagnostics. Only available if `ADMIN_SECRET_KEY` is configured.
+
+**Query Parameters:**
+- `key` - Admin secret key (must match `ADMIN_SECRET_KEY` environment variable)
+
+**Response (200):**
+```json
+{
+  "user_count": 42,
+  "backup_count": 38,
+  "database_size_bytes": 1048576,
+  "database_size_human": "1.00 MB"
+}
+```
+
+**Errors:**
+- `401 Unauthorized` - Missing or invalid admin key, or admin endpoints not enabled
+
+**Security:**
+- Endpoint is disabled unless `ADMIN_SECRET_KEY` environment variable is set
+- Key is passed as query parameter for easy curl access from Fly.io SSH
+
 ## Database Schema (redb)
 
 The server uses redb, an embedded key-value database. All records are serialized with bincode.
@@ -319,6 +343,9 @@ ALLOWED_ORIGINS=http://localhost:5173,https://dailyreps.netlify.app
 
 # Logging
 RUST_LOG=info                # debug, info, warn, error
+
+# Admin API (optional) - enables /admin/stats endpoint
+ADMIN_SECRET_KEY=your-admin-secret-key-here
 ```
 
 ## Security Best Practices

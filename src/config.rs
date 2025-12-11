@@ -13,6 +13,7 @@ pub struct Config {
     pub register_rate_limit_window_secs: u64,
     pub environment: String,
     pub app_secret_key: String,
+    pub admin_secret_key: Option<String>,
 }
 
 impl Config {
@@ -61,6 +62,8 @@ impl Config {
         let app_secret_key = env::var("APP_SECRET_KEY")
             .map_err(|_| "APP_SECRET_KEY must be set for HMAC verification")?;
 
+        let admin_secret_key = env::var("ADMIN_SECRET_KEY").ok();
+
         Ok(Config {
             server_host,
             server_port,
@@ -72,6 +75,7 @@ impl Config {
             register_rate_limit_window_secs,
             environment,
             app_secret_key,
+            admin_secret_key,
         })
     }
 
