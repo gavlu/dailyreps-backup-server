@@ -1034,6 +1034,14 @@ wrk -t2 -c10 -d30s --latency \
    - Optional: Email when backup succeeds/fails
    - Requires email service integration
 
+5. **Compression Analysis for Anomaly Detection**
+   - Detect non-JSON data patterns in encrypted backups
+   - Analyze entropy to identify abuse (random data vs structured JSON)
+   - Add constants when implementing:
+     - `EXPECTED_APP_ID: &str = "dailyreps-app"` - for envelope validation
+     - `PROTOCOL_VERSION: &str = "1.0"` - for versioning backup format
+   - This helps prevent storage abuse from non-official clients
+
 ### Long-term (6-12+ months)
 
 1. **Multi-Device Sync**
