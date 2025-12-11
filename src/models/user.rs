@@ -1,13 +1,20 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// User model representing a registered user
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+/// User record stored in redb
+/// Uses Unix timestamp for compact storage with bincode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRecord {
+    /// When the user was created (Unix timestamp)
+    pub created_at: i64,
+}
+
+/// User model for API responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     /// User ID (SHA-256 hash of username)
     pub id: String,
-    /// When the user was created
-    pub created_at: DateTime<Utc>,
+    /// When the user was created (Unix timestamp)
+    pub created_at: i64,
 }
 
 impl User {
@@ -24,7 +31,7 @@ mod tests {
     #[test]
     fn test_validate_id() {
         // Valid SHA-256 hash (64 hex characters)
-        let valid_id = "a" * 64;
+        let valid_id = "a".repeat(64);
         assert!(User::validate_id(&valid_id));
 
         // Too short
@@ -32,7 +39,7 @@ mod tests {
         assert!(!User::validate_id(&short_id));
 
         // Too long
-        let long_id = "a" * 65;
+        let long_id = "a".repeat(65);
         assert!(!User::validate_id(&long_id));
 
         // Invalid characters
@@ -42,5 +49,18 @@ mod tests {
         // Real SHA-256 hash
         let real_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         assert!(User::validate_id(real_hash));
+    }
+
+    #[test]
+    fn test_user_record_serialization() {
+        let record = UserRecord {
+            created_at: 1733788800,
+        };
+
+        // Verify bincode serialization works
+        let bytes = bincode::serialize(&record).unwrap();
+        let deserialized: UserRecord = bincode::deserialize(&bytes).unwrap();
+
+        assert_eq!(record.created_at, deserialized.created_at);
     }
 }

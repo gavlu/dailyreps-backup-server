@@ -5,7 +5,7 @@ use std::env;
 pub struct Config {
     pub server_host: String,
     pub server_port: u16,
-    pub database_url: String,
+    pub database_path: String,
     pub allowed_origins: Vec<String>,
     pub rate_limit_requests: u64,
     pub rate_limit_window_secs: u64,
@@ -27,8 +27,8 @@ impl Config {
             .parse()
             .map_err(|_| "Invalid SERVER_PORT")?;
 
-        let database_url = env::var("DATABASE_URL")
-            .map_err(|_| "DATABASE_URL must be set")?;
+        let database_path = env::var("DATABASE_PATH")
+            .unwrap_or_else(|_| "./data/dailyreps.db".to_string());
 
         let allowed_origins = env::var("ALLOWED_ORIGINS")
             .unwrap_or_else(|_| "http://localhost:5173".to_string())
@@ -65,7 +65,7 @@ impl Config {
         Ok(Config {
             server_host,
             server_port,
-            database_url,
+            database_path,
             allowed_origins,
             rate_limit_requests,
             rate_limit_window_secs,
