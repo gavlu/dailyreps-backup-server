@@ -16,9 +16,3 @@ pub const MAX_BACKUPS_PER_DAY: i32 = 20;
 /// Maximum age of timestamp in seconds (5 minutes)
 /// Prevents replay attacks
 pub const MAX_TIMESTAMP_AGE_SECS: i64 = 300;
-
-/// Expected app ID in backup envelope
-pub const EXPECTED_APP_ID: &str = "dailyreps-app";
-
-/// Current protocol version
-pub const PROTOCOL_VERSION: &str = "1.0";
