@@ -39,30 +39,27 @@ The server operates on a zero-knowledge principle:
 ## Technology Stack
 
 ### Web Framework
-- **Axum** - Type-safe, ergonomic web framework built on Tokio
-- **Tower** - Middleware for CORS, rate limiting, tracing
+- **Axum 0.8** - Type-safe, ergonomic web framework built on Tokio
+- **Tower 0.5** - Middleware for CORS, tracing
 - **Tokio** - Async runtime
 
 ### Database
-- **PostgreSQL** - Primary database for user records and encrypted backups
-- **SQLx** - Compile-time checked SQL queries with async support
-- Migrations managed via `sqlx-cli`
+- **redb 3** - Embedded key-value database (no external dependencies)
+- **bincode 2** - Binary serialization for database records
 
 ### Security & Cryptography
 - **sha2** - SHA-256 hashing for user IDs and storage keys
-- **argon2** - Password hashing (if needed for future features)
-- **tower-http** - CORS middleware, request logging
-- **tower-governor** - Rate limiting per IP/user
+- **hmac** - HMAC-SHA256 signature verification
+- **tower-http 0.6** - CORS middleware, request logging
 
 ### Serialization & Configuration
 - **serde** + **serde_json** - JSON serialization/deserialization
 - **dotenvy** - Environment variable management
-- **config** - Application configuration management
 
 ### Development & Testing
 - **tokio-test** - Testing utilities for async code
 - **reqwest** - HTTP client for integration tests
-- **testcontainers** - Docker containers for database testing
+- **tempfile** - Temporary directories for test databases
 
 ## Project Structure
 
@@ -71,29 +68,25 @@ dailyreps-backup-server/
 ├── src/
 │   ├── main.rs              # Application entry point, server setup
 │   ├── config.rs            # Configuration management
+│   ├── constants.rs         # Limits & security constants
+│   ├── error.rs             # Error types and handling
+│   ├── security.rs          # HMAC verification, timestamp validation
 │   ├── routes/
 │   │   ├── mod.rs           # Route module exports
 │   │   ├── health.rs        # Health check endpoint
 │   │   ├── register.rs      # User registration
 │   │   ├── backup.rs        # Backup storage/retrieval
-│   │   └── auth.rs          # Authentication helpers
+│   │   └── delete.rs        # User deletion
 │   ├── models/
 │   │   ├── mod.rs           # Model exports
 │   │   ├── user.rs          # User model
-│   │   └── backup.rs        # Backup model
-│   ├── db/
-│   │   ├── mod.rs           # Database module exports
-│   │   └── pool.rs          # Database connection pool
-│   ├── middleware/
-│   │   ├── mod.rs           # Middleware exports
-│   │   ├── cors.rs          # CORS configuration
-│   │   ├── rate_limit.rs    # Rate limiting
-│   │   └── logging.rs       # Request/response logging
-│   └── error.rs             # Error types and handling
-├── migrations/              # SQLx database migrations
+│   │   ├── backup.rs        # Backup model
+│   │   └── rate_limit.rs    # Rate limit tracking
+│   └── db/
+│       ├── mod.rs           # Database initialization
+│       └── tables.rs        # redb table definitions
 ├── tests/
-│   ├── integration/         # Integration tests
-│   └── common/              # Shared test utilities
+│   └── integration_tests.rs # Integration tests
 ├── Cargo.toml               # Dependencies and metadata
 ├── .env.example             # Example environment variables
 ├── Dockerfile               # Production container image
@@ -105,40 +98,18 @@ dailyreps-backup-server/
 ### Running the application
 
 ```bash
-# Start PostgreSQL (via Docker)
-docker run -d --name dailyreps-postgres \
-  -e POSTGRES_PASSWORD=dev_password \
-  -e POSTGRES_DB=dailyreps_backup \
-  -p 5432:5432 \
-  postgres:16
-
-# Run database migrations
-sqlx migrate run
+# Set required environment variables
+export APP_SECRET_KEY=$(openssl rand -hex 32)
+export DATABASE_PATH=./data/dailyreps.db
+export ALLOWED_ORIGINS=http://localhost:5173
 
 # Start development server
 cargo run
 
 # Start with auto-reload
 cargo watch -x run
-```
 
-### Database Management
-
-```bash
-# Install sqlx-cli
-cargo install sqlx-cli --no-default-features --features postgres
-
-# Create a new migration
-sqlx migrate add <migration_name>
-
-# Run migrations
-sqlx migrate run
-
-# Revert last migration
-sqlx migrate revert
-
-# Check database schema matches SQLx queries at compile time
-cargo sqlx prepare
+# Database file is created automatically at DATABASE_PATH
 ```
 
 ### Testing
@@ -200,7 +171,9 @@ Register a new user by claiming a server user ID.
 **Request:**
 ```json
 {
-  "userId": "sha256_hash_of_email"
+  "userId": "64-char-hex-sha256",
+  "signature": "64-char-hex-hmac-sha256",
+  "timestamp": 1234567890
 }
 ```
 
@@ -211,12 +184,9 @@ Register a new user by claiming a server user ID.
 }
 ```
 
-**Response (409 Conflict):**
-```json
-{
-  "error": "User already exists"
-}
-```
+**Errors:**
+- `409 Conflict` - User already exists
+- `401 Unauthorized` - Invalid signature or timestamp
 
 ### POST /api/backup
 Store or update encrypted backup data.
@@ -224,9 +194,11 @@ Store or update encrypted backup data.
 **Request:**
 ```json
 {
-  "userId": "sha256_hash_of_email",
-  "storageKey": "sha256_hash_of_userid_plus_password",
-  "data": "base64_encoded_encrypted_data"
+  "userId": "64-char-hex-sha256",
+  "storageKey": "64-char-hex-sha256",
+  "data": "base64_encoded_encrypted_data",
+  "signature": "64-char-hex-hmac-sha256",
+  "timestamp": 1234567890
 }
 ```
 
@@ -238,12 +210,18 @@ Store or update encrypted backup data.
 }
 ```
 
+**Errors:**
+- `401 Unauthorized` - Invalid signature or timestamp
+- `404 Not Found` - User not registered
+- `413 Payload Too Large` - Data exceeds 5MB
+- `429 Too Many Requests` - Rate limit exceeded (5/hour, 20/day)
+
 ### GET /api/backup?userId=...&storageKey=...
 Retrieve encrypted backup data.
 
 **Query Parameters:**
-- `userId` - Server user ID hash
-- `storageKey` - Storage key hash
+- `userId` - Server user ID hash (64-char hex)
+- `storageKey` - Storage key hash (64-char hex)
 
 **Response (200):**
 ```json
@@ -253,12 +231,8 @@ Retrieve encrypted backup data.
 }
 ```
 
-**Response (404):**
-```json
-{
-  "error": "Backup not found"
-}
-```
+**Errors:**
+- `404 Not Found` - Backup not found
 
 ### DELETE /api/user
 Permanently delete user and all associated data.
@@ -266,9 +240,9 @@ Permanently delete user and all associated data.
 **Request:**
 ```json
 {
-  "userId": "sha256_hash_of_username",
-  "storageKey": "sha256_hash_of_userid_plus_password",
-  "signature": "hmac_sha256_signature",
+  "userId": "64-char-hex-sha256",
+  "storageKey": "64-char-hex-sha256",
+  "signature": "64-char-hex-hmac-sha256",
   "timestamp": 1234567890
 }
 ```
@@ -281,19 +255,9 @@ Permanently delete user and all associated data.
 }
 ```
 
-**Response (401):**
-```json
-{
-  "error": "Invalid signature - data must come from official app"
-}
-```
-
-**Response (404):**
-```json
-{
-  "error": "User not found"
-}
-```
+**Errors:**
+- `401 Unauthorized` - Invalid signature, timestamp, or storage key mismatch
+- `404 Not Found` - User not found
 
 **Security:**
 - Requires valid HMAC signature (proves request from official app)
@@ -308,36 +272,31 @@ Health check endpoint for monitoring.
 ```json
 {
   "status": "healthy",
-  "database": "connected",
-  "version": "0.1.0"
+  "database": "connected"
 }
 ```
 
-## Database Schema
+## Database Schema (redb)
 
-### users table
-```sql
-CREATE TABLE users (
-    id TEXT PRIMARY KEY,              -- SHA-256 hash of email
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+The server uses redb, an embedded key-value database. All records are serialized with bincode.
 
-CREATE INDEX idx_users_created_at ON users(created_at);
-```
+### Tables
 
-### backups table
-```sql
-CREATE TABLE backups (
-    storage_key TEXT PRIMARY KEY,     -- SHA-256 hash of userId + password
-    user_id TEXT NOT NULL,            -- References users(id)
-    encrypted_data TEXT NOT NULL,     -- Base64 encoded encrypted blob
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-);
+```rust
+// Users table: user_id (SHA-256 hash) -> UserRecord
+USERS: TableDefinition<&str, &[u8]>
+// UserRecord { created_at: i64 }  // Unix timestamp
 
-CREATE INDEX idx_backups_user_id ON backups(user_id);
-CREATE INDEX idx_backups_updated_at ON backups(updated_at);
+// Backups table: storage_key (SHA-256 hash) -> BackupRecord
+BACKUPS: TableDefinition<&str, &[u8]>
+// BackupRecord { user_id, encrypted_data, created_at, updated_at }
+
+// Rate limits table: user_id -> RateLimitRecord
+RATE_LIMITS: TableDefinition<&str, &[u8]>
+// RateLimitRecord { backups_this_hour, backups_today, hour_reset_at, day_reset_at }
+
+// User backups index: user_id -> Vec<storage_key> (for cascade delete)
+USER_BACKUPS: TableDefinition<&str, &[u8]>
 ```
 
 ## Environment Variables
@@ -349,15 +308,14 @@ Required environment variables (see `.env.example`):
 SERVER_HOST=0.0.0.0
 SERVER_PORT=8080
 
-# Database
-DATABASE_URL=postgresql://user:password@localhost:5432/dailyreps_backup
+# Database (redb file path)
+DATABASE_PATH=./data/dailyreps.db
+
+# Security (MUST match client app)
+APP_SECRET_KEY=your-secret-key-here-generate-with-openssl-rand-hex-32
 
 # CORS (comma-separated allowed origins)
 ALLOWED_ORIGINS=http://localhost:5173,https://dailyreps.netlify.app
-
-# Rate Limiting
-RATE_LIMIT_REQUESTS=100      # Requests per window
-RATE_LIMIT_WINDOW_SECS=60    # Window duration in seconds
 
 # Logging
 RUST_LOG=info                # debug, info, warn, error
@@ -371,9 +329,8 @@ RUST_LOG=info                # debug, info, warn, error
 - Sanitize error messages (don't leak internal details)
 
 ### Rate Limiting
-- Per-IP rate limiting on all endpoints
-- Stricter limits on registration endpoint
-- Return 429 Too Many Requests with Retry-After header
+- Database-backed per-user rate limiting (5/hour, 20/day)
+- Return 429 Too Many Requests when exceeded
 
 ### CORS Configuration
 - Explicitly whitelist allowed origins (never use `*` in production)
@@ -381,10 +338,8 @@ RUST_LOG=info                # debug, info, warn, error
 - Don't expose sensitive headers
 
 ### Database Security
-- Use parameterized queries (SQLx provides this by default)
-- Never concatenate user input into SQL
-- Use connection pooling with limits
-- Enable SSL for database connections in production
+- Embedded database (redb) - no external attack surface
+- All user data is encrypted client-side before storage
 
 ### Error Handling
 - Return generic error messages to clients
@@ -400,16 +355,17 @@ RUST_LOG=info                # debug, info, warn, error
 ## Rust Best Practices for This Project
 
 ### Error Handling
-Use `anyhow` for application errors with context:
+Use `thiserror` for custom error types:
 
 ```rust
-use anyhow::{Context, Result};
+use thiserror::Error;
 
-async fn do_something() -> Result<String> {
-    let data = fetch_data()
-        .await
-        .context("Failed to fetch data from database")?;
-    Ok(data)
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("User not found")]
+    NotFound,
+    #[error("Database error: {0}")]
+    Database(#[from] redb::Error),
 }
 ```
 
@@ -421,19 +377,6 @@ Always use `async/await` with Tokio:
 async fn main() -> Result<()> {
     // Async code here
 }
-```
-
-### Database Queries
-Use SQLx with compile-time checked queries:
-
-```rust
-let user = sqlx::query_as!(
-    User,
-    r#"SELECT id, created_at FROM users WHERE id = $1"#,
-    user_id
-)
-.fetch_optional(&pool)
-.await?;
 ```
 
 ### Type Safety
@@ -460,8 +403,8 @@ Write tests for all critical paths:
 ```rust
 #[tokio::test]
 async fn test_register_user() {
-    let pool = setup_test_db().await;
-    let result = register_user(&pool, "test_hash").await;
+    let db = setup_test_db();
+    let result = register_user(&db, "test_hash").await;
     assert!(result.is_ok());
 }
 ```
@@ -475,23 +418,23 @@ async fn test_register_user() {
 curl -L https://fly.io/install.sh | sh
 
 # Login
-flyctl auth login
+fly auth login
 
-# Launch app (first time)
-flyctl launch
+# Create volume for database (first time)
+fly volumes create dailyreps_data --region iad --size 1
+
+# Set secrets
+fly secrets set APP_SECRET_KEY=your-secret-here
+fly secrets set ALLOWED_ORIGINS=https://dailyreps.netlify.app
 
 # Deploy
-flyctl deploy
-
-# Set environment variables
-flyctl secrets set DATABASE_URL=postgresql://...
-flyctl secrets set ALLOWED_ORIGINS=https://dailyreps.netlify.app
+fly deploy
 
 # View logs
-flyctl logs
+fly logs
 
 # SSH into instance
-flyctl ssh console
+fly ssh console
 ```
 
 ### Docker Deployment
@@ -503,7 +446,8 @@ docker build -t dailyreps-backup-server .
 # Run container
 docker run -d \
   -p 8080:8080 \
-  -e DATABASE_URL=postgresql://... \
+  -v dailyreps_data:/data \
+  -e APP_SECRET_KEY=your-secret-here \
   -e ALLOWED_ORIGINS=https://dailyreps.netlify.app \
   dailyreps-backup-server
 ```
@@ -519,13 +463,12 @@ docker run -d \
 - Request count by endpoint
 - Response times (p50, p95, p99)
 - Error rates by endpoint
-- Database connection pool usage
-- Active connections
+- Database file size
 
 ### Health Checks
-- Database connectivity check
+- Database connectivity check via `/health` endpoint
 - Response time check
-- Disk space check (for container deployments)
+- Volume storage check (for container deployments)
 
 ## Code Quality Standards
 
@@ -544,7 +487,6 @@ All three must pass:
 ### Code Review Checklist
 - [ ] All functions have doc comments
 - [ ] Error handling uses `Result<T>` with proper context
-- [ ] Database queries are parameterized
 - [ ] Input validation on all user inputs
 - [ ] Tests cover happy path and error cases
 - [ ] No unwrap() or expect() in production code paths
@@ -562,7 +504,7 @@ Since you're new to Rust, here are key concepts to understand:
 ### Error Handling
 - `Result<T, E>` for operations that can fail
 - `?` operator for propagating errors
-- `anyhow` for application-level errors
+- `thiserror` for custom error types
 
 ### Async/Await
 - `async fn` returns a `Future`
@@ -580,7 +522,7 @@ When adding new endpoints or functionality:
 
 1. **Plan the change** - Update IMPLEMENTATION_PLAN.md
 2. **Write the types** - Define models in `src/models/`
-3. **Create migration** - Add database changes in `migrations/`
+3. **Update tables** - Add table definitions in `src/db/tables.rs` if needed
 4. **Implement route** - Add handler in `src/routes/`
 5. **Add tests** - Cover happy path and errors
 6. **Update docs** - Document API endpoint in this file

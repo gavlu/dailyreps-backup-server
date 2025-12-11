@@ -1,9 +1,8 @@
 # Implementation Plan: DailyReps Encrypted Backup Server
 
 **Status**: Server Implementation & Testing Complete - Ready for Deployment
-**Last Updated**: 2025-12-10
+**Last Updated**: 2025-12-11
 **Target**: Production-Ready Rust API Server
-**Tests**: 53 passing (34 unit + 19 integration)
 
 ## Table of Contents
 
@@ -259,14 +258,14 @@
 ```toml
 [dependencies]
 # Web framework
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Database - embedded key-value store
-redb = "2"
-bincode = "1.3"
+redb = "3"
+bincode = "2"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -281,8 +280,7 @@ hex = "0.4"
 dotenvy = "0.15"
 
 # Error handling
-anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2"
 
 # Logging
 tracing = "0.1"
@@ -456,22 +454,22 @@ pub const USER_BACKUPS: TableDefinition<&str, &[u8]> = TableDefinition::new("use
 - [x] Test error cases (invalid inputs, missing data, etc.)
 - [x] Test rate limiting behavior
 
-**Unit tests (34 tests in `src/`)**:
+**Unit tests (in `src/`)**:
 - `src/models/user.rs` - User ID validation, serialization tests
 - `src/models/backup.rs` - Storage key validation, serialization tests
 - `src/models/rate_limit.rs` - Rate limit check_and_increment, hourly/daily reset tests
-- `src/security.rs` - HMAC verification, timestamp validation, pepper application, entropy analysis, base64 decoding
+- `src/security.rs` - HMAC verification, timestamp validation
 
-**Integration tests (19 tests in `tests/integration_tests.rs`)**:
+**Integration tests (in `tests/integration_tests.rs`)**:
 - Health check endpoint
 - User registration (success, duplicate, invalid format)
-- Backup storage (success, invalid signature, expired timestamp, non-existent user, invalid envelope)
+- Backup storage (success, invalid signature, expired timestamp, non-existent user)
 - Backup retrieval (success, not found, invalid user ID, wrong storage key)
 - User deletion (success, invalid signature, not found)
 - Rate limiting (hourly limit enforcement)
 - Backup update (upsert behavior)
 
-**Deliverable**: ✅ Comprehensive test suite with 53 tests covering all endpoints and edge cases
+**Deliverable**: ✅ Comprehensive test suite covering all endpoints and edge cases
 
 ---
 
@@ -979,13 +977,10 @@ wrk -t2 -c10 -d30s --latency \
    - Optional: Email when backup succeeds/fails
    - Requires email service integration
 
-5. **Compression Analysis for Anomaly Detection** ✅ COMPLETE
-   - ✅ Detect non-JSON data patterns in encrypted backups via envelope validation
-   - ✅ Analyze entropy to identify abuse (low entropy = unencrypted data)
-   - ✅ Added `EXPECTED_APP_ID` constant for envelope validation
-   - ✅ BackupEnvelope struct validates appId and encrypted data
-   - ✅ Shannon entropy calculation flags suspiciously low-entropy data
-   - This helps prevent storage abuse from non-official clients
+5. **Anomaly Detection** (Removed - simplified security model)
+   - Previously included envelope validation and entropy analysis
+   - Removed as HMAC signatures already prove app authenticity
+   - Simplified architecture reduces code complexity
 
 ### Long-term (6-12+ months)
 
@@ -1063,7 +1058,7 @@ A: PBKDF2 is natively supported in Web Crypto API (browser). Argon2 would requir
 A: Not without the password. storageKey = SHA256(userId + password), so password is required to derive the link.
 
 **Q: What prevents rainbow table attacks on userId hashes?**
-A: Short or common usernames could be vulnerable to rainbow tables. Users should be encouraged to use unique usernames. Future: add server-side pepper for additional protection.
+A: Short or common usernames could be vulnerable to rainbow tables. Users should be encouraged to use unique usernames. However, since user IDs are not identifying information (the server doesn't know what they represent), this is acceptable risk.
 
 **Q: Why allow any username instead of requiring email?**
 A: Provides more privacy and flexibility. Users can choose any identifier they want without exposing their email address to even the hashed form on the server.
@@ -1119,7 +1114,6 @@ A: Provides more privacy and flexibility. Users can choose any identifier they w
 - [x] Layer 2: Rate limiting (per-user hourly/daily limits)
 - [x] Layer 3: HMAC signatures (proves data from official app)
 - [x] Layer 4: Timestamp validation (prevents replay attacks)
-- [x] Layer 5: Compression analysis (envelope validation + entropy check)
 - [x] Constants module for all limits
 - [x] Security module for cryptographic verification
 
@@ -1131,10 +1125,10 @@ A: Provides more privacy and flexibility. Users can choose any identifier they w
 - [x] Code compiles with `cargo check`
 - [x] No clippy warnings
 - [x] Code formatted with `cargo fmt`
-- [x] 34 unit tests (models, security)
-- [x] 19 integration tests (all endpoints)
+- [x] Unit tests (models, security)
+- [x] Integration tests (all endpoints)
 - [x] Rate limiting tests
-- [x] All 53 tests passing
+- [x] All tests passing
 
 ---
 
@@ -1156,7 +1150,6 @@ A: Provides more privacy and flexibility. Users can choose any identifier they w
 - [ ] Backup versioning (keep last 10 versions)
 - [ ] Usage metrics dashboard
 - [ ] Email notifications (optional)
-- [x] Compression analysis for anomaly detection ✅
 - [ ] Per-user storage quotas
 - [ ] HMAC authentication tags on encrypted data
 
@@ -1189,7 +1182,6 @@ A: Provides more privacy and flexibility. Users can choose any identifier they w
 | Error message sanitization | No internal details leaked | ✅ |
 | Structured logging | All actions logged securely | ✅ |
 | Cascading deletes | User deletion removes all data | ✅ |
-| Compression analysis | Envelope validation + entropy check | ✅ |
 
 ---
 
@@ -1216,8 +1208,7 @@ A: Provides more privacy and flexibility. Users can choose any identifier they w
 
 ---
 
-**Last Updated**: 2025-12-10
+**Last Updated**: 2025-12-11
 **Author**: Claude + Gavin
 **Status**: Server implementation & testing complete - ready for deployment
 **Completion**: ~95% (Server & tests done, client integration remaining)
-**Test Coverage**: 53 tests (34 unit + 19 integration)

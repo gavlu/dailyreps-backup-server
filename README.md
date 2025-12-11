@@ -3,8 +3,8 @@
 A secure Rust backend service for the DailyReps workout tracking app, providing zero-knowledge encrypted backup storage with comprehensive anti-griefing measures.
 
 ![Rust](https://img.shields.io/badge/Rust-1.91-orange?style=flat&logo=rust)
-![Axum](https://img.shields.io/badge/Axum-0.7-blue?style=flat)
-![redb](https://img.shields.io/badge/redb-2.x-green?style=flat)
+![Axum](https://img.shields.io/badge/Axum-0.8-blue?style=flat)
+![redb](https://img.shields.io/badge/redb-3.x-green?style=flat)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ## Overview
@@ -18,7 +18,6 @@ This server stores encrypted workout data from DailyReps clients using a zero-kn
 - **Timestamp validation** - Prevents replay attacks (5-minute window)
 - **Rate limiting** - Database-backed limits (5/hour, 20/day per user)
 - **Size limits** - 5MB maximum payload size
-- **Envelope validation** - Verifies backup format and entropy
 - **Complete deletion** - Users can permanently delete all their data
 - **Embedded database** - No external dependencies (redb)
 
@@ -36,8 +35,8 @@ This server stores encrypted workout data from DailyReps clients using a zero-kn
 │          │                 │                                        │
 │          ▼                 ▼                                        │
 │  ┌─────────────────────────────────────┐                            │
-│  │ Encrypted Backup Envelope           │                            │
-│  │ { appId, encrypted: base64(...) }   │                            │
+│  │ Encrypted Backup Data               │                            │
+│  │ base64(AES-GCM encrypted blob)      │                            │
 │  └─────────────────┬───────────────────┘                            │
 └────────────────────│────────────────────────────────────────────────┘
                      │ HTTPS
@@ -46,12 +45,12 @@ This server stores encrypted workout data from DailyReps clients using a zero-kn
 │                      Backup Server (Rust/Axum)                      │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │                    Security Layers                          │    │
-│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────┐  │    │
-│  │  │  Size   │ │  Rate   │ │  HMAC   │ │Timestamp│ │Entropy│  │    │
-│  │  │ Limits  │ │ Limits  │ │  Verify │ │ Check   │ │ Check │  │    │
-│  │  │  5MB    │ │ 5/hr    │ │ SHA-256 │ │ ±5 min  │ │ >0.75 │  │    │
-│  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └───┬───┘  │    │
-│  │       └───────────┴───────────┴───────────┴─────────┘       │    │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐            │    │
+│  │  │  Size   │ │  Rate   │ │  HMAC   │ │Timestamp│            │    │
+│  │  │ Limits  │ │ Limits  │ │  Verify │ │ Check   │            │    │
+│  │  │  5MB    │ │ 5/hr    │ │ SHA-256 │ │ ±5 min  │            │    │
+│  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘            │    │
+│  │       └───────────┴───────────┴───────────┘                 │    │
 │  └─────────────────────────────┬───────────────────────────────┘    │
 │                                │                                    │
 │  ┌─────────────────────────────▼───────────────────────────────┐    │
@@ -97,22 +96,18 @@ Client Request                     Server Processing
      │  {                                │
      │    userId: "abc123...",           │
      │    storageKey: "def456...",   ───►│──► 1. Verify HMAC signature
-     │    data: "{appId:...,             │
-     │           encrypted:...}",        │──► 2. Validate timestamp (±5 min)
-     │    signature: "...",              │
-     │    timestamp: 1234567890          │──► 3. Check size (≤5MB)
-     │  }                                │
+     │    data: "base64...",             │
+     │    signature: "...",              │──► 2. Validate timestamp (±5 min)
+     │    timestamp: 1234567890          │
+     │  }                                │──► 3. Check size (≤5MB)
+     │                                   │
      │                                   │──► 4. Validate userId/storageKey format
      │                                   │
-     │                                   │──► 5. Parse envelope, check appId
+     │                                   │──► 5. Verify user exists
      │                                   │
-     │                                   │──► 6. Calculate entropy (≥0.75)
+     │                                   │──► 6. Check rate limits (5/hr, 20/day)
      │                                   │
-     │                                   │──► 7. Verify user exists
-     │                                   │
-     │                                   │──► 8. Check rate limits (5/hr, 20/day)
-     │                                   │
-     │                                   │──► 9. Store encrypted blob
+     │                                   │──► 7. Store encrypted blob
      │                                   │
      │  200 OK ◄─────────────────────────│
      │  { success: true }                │
@@ -162,11 +157,6 @@ Client Request                     Server Processing
 │                    Anti-Griefing Stack                          │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  Layer 5: Envelope Validation + Entropy Check                   │
-│  ├── Requires { appId: "dailyreps-app", encrypted: "..." }      │
-│  ├── Rejects non-JSON envelope formats                          │
-│  └── Flags entropy < 0.75 (likely unencrypted data)             │
-│           │                                                     │
 │  Layer 4: Timestamp Validation                                  │
 │  ├── Request timestamp must be within ±5 minutes                │
 │  └── Prevents replay attacks                                    │
@@ -192,12 +182,12 @@ Client Request                     Server Processing
 
 ## Technology Stack
 
-- **Framework**: [Axum 0.7](https://github.com/tokio-rs/axum) - Fast, ergonomic web framework
+- **Framework**: [Axum 0.8](https://github.com/tokio-rs/axum) - Fast, ergonomic web framework
 - **Runtime**: [Tokio](https://tokio.rs/) - Async runtime
-- **Database**: [redb 2.x](https://github.com/cberner/redb) - Embedded key-value store
-- **Serialization**: [bincode](https://github.com/bincode-org/bincode) - Binary encoding
-- **Security**: HMAC-SHA256 signatures, timestamp validation, entropy analysis
-- **CORS**: [tower-http](https://github.com/tower-rs/tower-http)
+- **Database**: [redb 3](https://github.com/cberner/redb) - Embedded key-value store
+- **Serialization**: [bincode 2](https://github.com/bincode-org/bincode) - Binary encoding
+- **Security**: HMAC-SHA256 signatures, timestamp validation
+- **CORS**: [tower-http 0.6](https://github.com/tower-rs/tower-http)
 
 ## API Endpoints
 
@@ -234,7 +224,7 @@ Store encrypted backup data.
 {
   "userId": "64-char-hex-sha256",
   "storageKey": "64-char-hex-sha256",
-  "data": "{\"appId\":\"dailyreps-app\",\"encrypted\":\"base64...\"}",
+  "data": "base64_encoded_encrypted_data",
   "signature": "64-char-hex-hmac-sha256",
   "timestamp": 1234567890
 }
@@ -249,7 +239,6 @@ Store encrypted backup data.
 ```
 
 **Errors:**
-- `400 Bad Request` - Invalid envelope format or suspicious entropy
 - `401 Unauthorized` - Invalid signature or timestamp
 - `404 Not Found` - User not registered
 - `413 Payload Too Large` - Data exceeds 5MB
@@ -263,7 +252,7 @@ Retrieve encrypted backup data.
 **Response:**
 ```json
 {
-  "data": "{\"appId\":\"dailyreps-app\",\"encrypted\":\"base64...\"}",
+  "data": "base64_encoded_encrypted_data",
   "updatedAt": "2025-01-01T12:00:00Z"
 }
 ```
@@ -474,8 +463,8 @@ docker run -d \
 **Protected Against:**
 - Unauthorized data access (server admin can't read data)
 - Replay attacks (timestamp validation)
-- Fake clients (HMAC signatures + envelope validation)
-- Storage abuse (size limits, rate limiting, entropy check)
+- Fake clients (HMAC signatures)
+- Storage abuse (size limits, rate limiting)
 - User enumeration (consistent error messages)
 
 **Not Protected Against:**
