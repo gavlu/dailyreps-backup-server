@@ -1,15 +1,15 @@
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
 const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
+use crate::AppState;
 use crate::constants::{ERR_INVALID_STORAGE_KEY, ERR_INVALID_USER_ID};
 use crate::db::tables;
 use crate::error::{AppError, Result};
 use crate::models::{Backup, BackupRecord, User};
 use crate::routes::validate_signed_request;
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct DeleteUserRequest {

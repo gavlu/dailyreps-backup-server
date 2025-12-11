@@ -1,15 +1,15 @@
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use chrono::Utc;
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
 const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
+use crate::AppState;
 use crate::constants::ERR_USER_ID_MUST_BE_SHA256;
 use crate::db::tables;
 use crate::error::{AppError, Result};
 use crate::models::{User, UserRecord};
-use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {

@@ -11,7 +11,7 @@ pub mod routes;
 pub mod security;
 
 pub use config::Config;
-pub use db::{open_database, Db};
+pub use db::{Db, open_database};
 pub use error::{AppError, Result};
 
 use std::sync::Arc;

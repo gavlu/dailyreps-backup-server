@@ -1,12 +1,12 @@
 use axum::{
-    extract::{Query, State},
     Json,
+    extract::{Query, State},
 };
 use redb::{ReadableDatabase, ReadableTableMetadata};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-use crate::{db::tables, error::Result, AppError, AppState};
+use crate::{AppError, AppState, db::tables, error::Result};
 
 /// Query parameters for admin stats endpoint
 #[derive(Debug, Deserialize)]
