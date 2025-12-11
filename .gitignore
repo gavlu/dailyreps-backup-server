@@ -27,4 +27,4 @@ Thumbs.db
 Cargo.lock
 
 # Temporary files
-/docs
+/tmp
