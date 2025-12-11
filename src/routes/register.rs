@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::db::tables;
 use crate::error::{AppError, Result};
 use crate::models::{User, UserRecord};
+use crate::security::apply_pepper;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -22,7 +23,15 @@ pub struct RegisterResponse {
 /// Register a new user
 ///
 /// Creates a new user record with the provided user ID (SHA-256 hash of username).
+/// The client-provided user ID is combined with a server-side pepper before storage
+/// to protect against rainbow table attacks.
+///
 /// Returns 409 Conflict if the user ID already exists.
+///
+/// # Security
+/// - User ID is peppered: `stored_id = SHA256(client_user_id + pepper)`
+/// - Pepper is stored in environment variable, not database
+/// - Database breach alone cannot identify users by username
 ///
 /// # Anti-Griefing
 /// - Stricter rate limiting applied at router level
@@ -39,7 +48,9 @@ pub async fn register_user(
         ));
     }
 
-    let user_id = payload.user_id.clone();
+    // Apply server-side pepper to the client-provided user ID
+    // This protects against rainbow table attacks if the database is breached
+    let peppered_user_id = apply_pepper(&payload.user_id, &state.config.user_id_pepper);
     let db = state.db.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -47,22 +58,22 @@ pub async fn register_user(
         {
             let mut table = write_txn.open_table(tables::USERS)?;
 
-            // Check if user already exists
-            if table.get(user_id.as_str())?.is_some() {
-                tracing::info!("User already exists: {}", user_id);
+            // Check if user already exists (using peppered ID)
+            if table.get(peppered_user_id.as_str())?.is_some() {
+                tracing::info!("User already exists (peppered)");
                 return Err(AppError::UserAlreadyExists);
             }
 
-            // Insert new user
+            // Insert new user with peppered ID
             let record = UserRecord {
                 created_at: Utc::now().timestamp(),
             };
             let bytes = bincode::serialize(&record)?;
-            table.insert(user_id.as_str(), bytes.as_slice())?;
+            table.insert(peppered_user_id.as_str(), bytes.as_slice())?;
         }
         write_txn.commit()?;
 
-        tracing::info!("New user registered: {}", user_id);
+        tracing::info!("New user registered (peppered)");
         Ok(())
     })
     .await??;

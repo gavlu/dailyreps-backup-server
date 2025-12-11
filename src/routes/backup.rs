@@ -10,7 +10,7 @@ use crate::constants::*;
 use crate::db::tables;
 use crate::error::{AppError, Result};
 use crate::models::{Backup, BackupRecord, RateLimitRecord, User};
-use crate::security::{analyze_backup_data, validate_timestamp, verify_hmac};
+use crate::security::{analyze_backup_data, apply_pepper, validate_timestamp, verify_hmac};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -139,11 +139,13 @@ pub async fn store_backup(
 
     // Log any warnings (for monitoring)
     if let Some(warning) = &analysis.warning {
-        tracing::info!("Backup warning for user {}: {}", payload.user_id, warning);
+        tracing::info!("Backup warning for user: {}", warning);
     }
 
+    // Apply server-side pepper to user ID for database lookups
+    let peppered_user_id = apply_pepper(&payload.user_id, &state.config.user_id_pepper);
+
     let db = state.db.clone();
-    let user_id = payload.user_id.clone();
     let storage_key = payload.storage_key.clone();
     let data = payload.data.clone();
 
@@ -152,17 +154,17 @@ pub async fn store_backup(
 
         let write_txn = db.begin_write()?;
         {
-            // 6. Verify user exists
+            // 6. Verify user exists (using peppered ID)
             let users = write_txn.open_table(tables::USERS)?;
-            if users.get(user_id.as_str())?.is_none() {
-                tracing::warn!("Backup attempt for non-existent user: {}", user_id);
+            if users.get(peppered_user_id.as_str())?.is_none() {
+                tracing::warn!("Backup attempt for non-existent user (peppered)");
                 return Err(AppError::UserNotFound);
             }
             drop(users);
 
-            // 7. Check and update rate limits
+            // 7. Check and update rate limits (using peppered ID)
             let mut rate_limits = write_txn.open_table(tables::RATE_LIMITS)?;
-            let mut rate_record = match rate_limits.get(user_id.as_str())? {
+            let mut rate_record = match rate_limits.get(peppered_user_id.as_str())? {
                 Some(bytes) => bincode::deserialize(bytes.value())?,
                 None => RateLimitRecord::new(now),
             };
@@ -171,10 +173,12 @@ pub async fn store_backup(
             rate_record.check_and_increment(now)?;
 
             let rate_bytes = bincode::serialize(&rate_record)?;
-            rate_limits.insert(user_id.as_str(), rate_bytes.as_slice())?;
+            rate_limits.insert(peppered_user_id.as_str(), rate_bytes.as_slice())?;
             drop(rate_limits);
 
             // 8. Upsert backup (insert or update if exists)
+            // Note: storage_key is NOT peppered - it's derived from userId+password
+            // and the client needs to be able to reconstruct it
             let mut backups = write_txn.open_table(tables::BACKUPS)?;
             let created_at = backups
                 .get(storage_key.as_str())?
@@ -183,7 +187,7 @@ pub async fn store_backup(
                 .unwrap_or(now);
 
             let backup_record = BackupRecord {
-                user_id: user_id.clone(),
+                user_id: peppered_user_id.clone(), // Store peppered user ID
                 encrypted_data: data,
                 created_at,
                 updated_at: now,
@@ -192,17 +196,17 @@ pub async fn store_backup(
             backups.insert(storage_key.as_str(), backup_bytes.as_slice())?;
             drop(backups);
 
-            // 9. Update user_backups index (for cascade delete)
+            // 9. Update user_backups index (for cascade delete, using peppered ID)
             let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
             let mut keys: Vec<String> = user_backups
-                .get(user_id.as_str())?
+                .get(peppered_user_id.as_str())?
                 .map(|b| bincode::deserialize(b.value()).unwrap_or_default())
                 .unwrap_or_default();
 
             if !keys.contains(&storage_key) {
                 keys.push(storage_key.clone());
                 let keys_bytes = bincode::serialize(&keys)?;
-                user_backups.insert(user_id.as_str(), keys_bytes.as_slice())?;
+                user_backups.insert(peppered_user_id.as_str(), keys_bytes.as_slice())?;
             }
         }
         write_txn.commit()?;
@@ -241,9 +245,11 @@ pub async fn retrieve_backup(
         ));
     }
 
+    // Apply server-side pepper to user ID for database lookups
+    let peppered_user_id = apply_pepper(&params.user_id, &state.config.user_id_pepper);
+
     let db = state.db.clone();
     let storage_key = params.storage_key.clone();
-    let user_id = params.user_id.clone();
 
     let result = tokio::task::spawn_blocking(move || -> Result<BackupRecord> {
         let read_txn = db.begin_read()?;
@@ -255,8 +261,8 @@ pub async fn retrieve_backup(
             .transpose()?
             .ok_or_else(|| AppError::BackupNotFound)?;
 
-        // Verify user_id matches (security check)
-        if record.user_id != user_id {
+        // Verify peppered user_id matches (security check)
+        if record.user_id != peppered_user_id {
             return Err(AppError::BackupNotFound);
         }
 
@@ -265,8 +271,7 @@ pub async fn retrieve_backup(
     .await??;
 
     tracing::info!(
-        "Backup retrieved for user {}: {} bytes",
-        params.user_id,
+        "Backup retrieved: {} bytes",
         result.encrypted_data.len()
     );
 

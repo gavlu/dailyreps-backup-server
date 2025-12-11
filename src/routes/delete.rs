@@ -6,7 +6,7 @@ use crate::constants::MAX_TIMESTAMP_AGE_SECS;
 use crate::db::tables;
 use crate::error::{AppError, Result};
 use crate::models::{BackupRecord, User};
-use crate::security::{validate_timestamp, verify_hmac};
+use crate::security::{apply_pepper, validate_timestamp, verify_hmac};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -79,17 +79,19 @@ pub async fn delete_user(
         ));
     }
 
+    // Apply server-side pepper to user ID for database lookups
+    let peppered_user_id = apply_pepper(&payload.user_id, &state.config.user_id_pepper);
+
     let db = state.db.clone();
-    let user_id = payload.user_id.clone();
     let storage_key = payload.storage_key.clone();
 
     tokio::task::spawn_blocking(move || -> Result<()> {
         let write_txn = db.begin_write()?;
         {
-            // 4. Verify user exists
+            // 4. Verify user exists (using peppered ID)
             let mut users = write_txn.open_table(tables::USERS)?;
-            if users.get(user_id.as_str())?.is_none() {
-                tracing::warn!("Delete attempt for non-existent user: {}", user_id);
+            if users.get(peppered_user_id.as_str())?.is_none() {
+                tracing::warn!("Delete attempt for non-existent user (peppered)");
                 return Err(AppError::UserNotFound);
             }
 
@@ -98,30 +100,24 @@ pub async fn delete_user(
             let backups_table = write_txn.open_table(tables::BACKUPS)?;
             if let Some(backup_bytes) = backups_table.get(storage_key.as_str())? {
                 let backup: BackupRecord = bincode::deserialize(backup_bytes.value())?;
-                if backup.user_id != user_id {
-                    tracing::warn!(
-                        "Delete attempt with mismatched storage key for user: {}",
-                        user_id
-                    );
+                if backup.user_id != peppered_user_id {
+                    tracing::warn!("Delete attempt with mismatched storage key (peppered)");
                     return Err(AppError::InvalidInput(
                         "Invalid credentials - storage key does not match user".to_string(),
                     ));
                 }
             } else {
-                tracing::warn!(
-                    "Delete attempt with invalid storage key for user: {}",
-                    user_id
-                );
+                tracing::warn!("Delete attempt with invalid storage key (peppered)");
                 return Err(AppError::InvalidInput(
                     "Invalid credentials - storage key does not match user".to_string(),
                 ));
             }
             drop(backups_table);
 
-            // 6. Get all backup keys for this user (for cascade delete)
+            // 6. Get all backup keys for this user (for cascade delete, using peppered ID)
             let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
             let backup_keys: Vec<String> = user_backups
-                .get(user_id.as_str())?
+                .get(peppered_user_id.as_str())?
                 .map(|b| bincode::deserialize(b.value()).unwrap_or_default())
                 .unwrap_or_default();
 
@@ -132,24 +128,21 @@ pub async fn delete_user(
             }
             drop(backups);
 
-            // 8. Delete rate limits
+            // 8. Delete rate limits (using peppered ID)
             let mut rate_limits = write_txn.open_table(tables::RATE_LIMITS)?;
-            rate_limits.remove(user_id.as_str())?;
+            rate_limits.remove(peppered_user_id.as_str())?;
             drop(rate_limits);
 
-            // 9. Delete user_backups index
-            user_backups.remove(user_id.as_str())?;
+            // 9. Delete user_backups index (using peppered ID)
+            user_backups.remove(peppered_user_id.as_str())?;
             drop(user_backups);
 
-            // 10. Delete user
-            users.remove(user_id.as_str())?;
+            // 10. Delete user (using peppered ID)
+            users.remove(peppered_user_id.as_str())?;
         }
         write_txn.commit()?;
 
-        tracing::info!(
-            "User {} and all associated data successfully deleted",
-            user_id
-        );
+        tracing::info!("User and all associated data successfully deleted (peppered)");
 
         Ok(())
     })

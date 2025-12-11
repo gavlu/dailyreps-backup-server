@@ -13,6 +13,9 @@ pub struct Config {
     pub register_rate_limit_window_secs: u64,
     pub environment: String,
     pub app_secret_key: String,
+    /// Server-side pepper for additional protection against rainbow table attacks
+    /// If database is breached, attacker cannot precompute hashes without this pepper
+    pub user_id_pepper: String,
 }
 
 impl Config {
@@ -61,6 +64,9 @@ impl Config {
         let app_secret_key = env::var("APP_SECRET_KEY")
             .map_err(|_| "APP_SECRET_KEY must be set for HMAC verification")?;
 
+        let user_id_pepper = env::var("USER_ID_PEPPER")
+            .map_err(|_| "USER_ID_PEPPER must be set for rainbow table protection")?;
+
         Ok(Config {
             server_host,
             server_port,
@@ -72,6 +78,7 @@ impl Config {
             register_rate_limit_window_secs,
             environment,
             app_secret_key,
+            user_id_pepper,
         })
     }
 
