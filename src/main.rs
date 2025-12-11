@@ -33,15 +33,18 @@ async fn main() -> anyhow::Result<()> {
     // Open or create the embedded database
     let db = open_database(&config.database_path)?;
 
-    // Configure CORS
+    // Configure CORS - parse origins and fail fast on invalid config
+    let allowed_origins: Vec<_> = config
+        .allowed_origins
+        .iter()
+        .map(|s| {
+            s.parse()
+                .map_err(|e| anyhow::anyhow!("Invalid CORS origin '{}': {}", s, e))
+        })
+        .collect::<Result<_, _>>()?;
+
     let cors = CorsLayer::new()
-        .allow_origin(
-            config
-                .allowed_origins
-                .iter()
-                .map(|s| s.parse().unwrap())
-                .collect::<Vec<_>>(),
-        )
+        .allow_origin(allowed_origins)
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
