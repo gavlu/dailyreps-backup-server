@@ -4,7 +4,7 @@ A secure Rust backend service for the DailyReps workout tracking app, providing 
 
 ![Rust](https://img.shields.io/badge/Rust-1.91-orange?style=flat&logo=rust)
 ![Axum](https://img.shields.io/badge/Axum-0.7-blue?style=flat)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue?style=flat&logo=postgresql)
+![redb](https://img.shields.io/badge/redb-2.x-green?style=flat)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ## Overview
@@ -13,59 +13,190 @@ This server stores encrypted workout data from DailyReps clients using a zero-kn
 
 ### Key Features
 
-- 🔐 **Zero-knowledge encryption** - Server stores only encrypted blobs
-- 🛡️ **HMAC signature verification** - Ensures data comes from official app
-- ⏱️ **Timestamp validation** - Prevents replay attacks (5-minute window)
-- 🚦 **Rate limiting** - Database-backed limits (5/hour, 20/day per user)
-- 📏 **Size limits** - 5MB maximum payload size
-- 🗑️ **Complete deletion** - Users can permanently delete all their data
-- 🔄 **CORS support** - Configured for web client access
+- **Zero-knowledge encryption** - Server stores only encrypted blobs
+- **HMAC signature verification** - Ensures data comes from official app
+- **Timestamp validation** - Prevents replay attacks (5-minute window)
+- **Rate limiting** - Database-backed limits (5/hour, 20/day per user)
+- **Size limits** - 5MB maximum payload size
+- **Envelope validation** - Verifies backup format and entropy
+- **Complete deletion** - Users can permanently delete all their data
+- **Embedded database** - No external dependencies (redb)
 
 ## Architecture
+
+### System Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         DailyReps Client                            │
+│  ┌───────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │ Web Crypto API│  │ HMAC Signing │  │ Key Derivation           │  │
+│  │ AES-GCM       │  │ SHA-256      │  │ PBKDF2(password,username)│  │
+│  └───────┬───────┘  └──────┬───────┘  └──────────────────────────┘  │
+│          │                 │                                        │
+│          ▼                 ▼                                        │
+│  ┌─────────────────────────────────────┐                            │
+│  │ Encrypted Backup Envelope           │                            │
+│  │ { appId, encrypted: base64(...) }   │                            │
+│  └─────────────────┬───────────────────┘                            │
+└────────────────────│────────────────────────────────────────────────┘
+                     │ HTTPS
+                     ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      Backup Server (Rust/Axum)                      │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │                    Security Layers                          │    │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌───────┐  │    │
+│  │  │  Size   │ │  Rate   │ │  HMAC   │ │Timestamp│ │Entropy│  │    │
+│  │  │ Limits  │ │ Limits  │ │  Verify │ │ Check   │ │ Check │  │    │
+│  │  │  5MB    │ │ 5/hr    │ │ SHA-256 │ │ ±5 min  │ │ >0.75 │  │    │
+│  │  └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘ └───┬───┘  │    │
+│  │       └───────────┴───────────┴───────────┴─────────┘       │    │
+│  └─────────────────────────────┬───────────────────────────────┘    │
+│                                │                                    │
+│  ┌─────────────────────────────▼───────────────────────────────┐    │
+│  │                    redb (Embedded Database)                 │    │
+│  │  ┌──────────┐ ┌──────────┐ ┌────────────┐ ┌──────────────┐  │    │
+│  │  │  users   │ │ backups  │ │rate_limits │ │ user_backups │  │    │
+│  │  │  table   │ │  table   │ │   table    │ │    index     │  │    │
+│  │  └──────────┘ └──────────┘ └────────────┘ └──────────────┘  │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ### Zero-Knowledge Design
 
 The server never sees plaintext data or encryption keys:
 
 ```
-Client generates:
-├── serverUserId = SHA-256(username)           # Server sees this
-├── storageKey = SHA-256(serverUserId + password)  # Server sees this
-├── encryptionKey = PBKDF2(password, username)     # Server NEVER sees this
-└── encrypted = AES-GCM(data, encryptionKey)       # Server stores this
-
-Server verifies:
-├── HMAC signature using APP_SECRET_KEY
-├── Timestamp within 5-minute window
-└── Payload size under 5MB limit
+┌─────────────────────────────────────────────────────────────────┐
+│                    Client-Side Key Derivation                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   username ──┬──► SHA-256 ──────────────────► serverUserId      │
+│              │                                (sent to server)  │
+│              │                                                  │
+│   password ──┼──► SHA-256(serverUserId + password) ► storageKey │
+│              │                                (sent to server)  │
+│              │                                                  │
+│              └──► PBKDF2(password, username) ──► encryptionKey  │
+│                                                 (NEVER sent)    │
+│                                                                 │
+│   data ──────────► AES-GCM(data, encryptionKey) ► encrypted     │
+│                                                   (sent to      │
+│                                                    server)      │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Database Schema
+### Request Flow
 
-**users**
-- `id` (TEXT, PK) - SHA-256(username)
-- `storage_key` (TEXT, UNIQUE) - For backup retrieval
-- `created_at` (TIMESTAMPTZ)
+```
+Client Request                     Server Processing
+     │                                   │
+     │  POST /api/backup                 │
+     │  {                                │
+     │    userId: "abc123...",           │
+     │    storageKey: "def456...",   ───►│──► 1. Verify HMAC signature
+     │    data: "{appId:...,             │
+     │           encrypted:...}",        │──► 2. Validate timestamp (±5 min)
+     │    signature: "...",              │
+     │    timestamp: 1234567890          │──► 3. Check size (≤5MB)
+     │  }                                │
+     │                                   │──► 4. Validate userId/storageKey format
+     │                                   │
+     │                                   │──► 5. Parse envelope, check appId
+     │                                   │
+     │                                   │──► 6. Calculate entropy (≥0.75)
+     │                                   │
+     │                                   │──► 7. Verify user exists
+     │                                   │
+     │                                   │──► 8. Check rate limits (5/hr, 20/day)
+     │                                   │
+     │                                   │──► 9. Store encrypted blob
+     │                                   │
+     │  200 OK ◄─────────────────────────│
+     │  { success: true }                │
+     ▼                                   ▼
+```
 
-**user_backups**
-- `storage_key` (TEXT, PK, FK → users)
-- `data` (TEXT) - Encrypted JSON blob
-- `updated_at` (TIMESTAMPTZ)
+### Database Schema (redb)
 
-**user_rate_limits**
-- `user_id` (TEXT, PK, FK → users)
-- `backups_this_hour` (INTEGER)
-- `backups_today` (INTEGER)
-- `last_backup_at` (TIMESTAMPTZ)
-- `hour_reset_at` (TIMESTAMPTZ)
-- `day_reset_at` (TIMESTAMPTZ)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         redb Tables                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  USERS: TableDefinition<&str, &[u8]>                            │
+│  ┌─────────────────┬────────────────────────────────────────┐   │
+│  │ Key (user_id)   │ Value (UserRecord serialized)          │   │
+│  │ "a1b2c3..."     │ { created_at: 1702134000 }             │   │
+│  └─────────────────┴────────────────────────────────────────┘   │
+│                                                                 │
+│  BACKUPS: TableDefinition<&str, &[u8]>                          │
+│  ┌─────────────────┬────────────────────────────────────────┐   │
+│  │ Key (storage_key)│ Value (BackupRecord serialized)       │   │
+│  │ "d4e5f6..."     │ { user_id, encrypted_data,             │   │
+│  │                 │   created_at, updated_at }             │   │
+│  └─────────────────┴────────────────────────────────────────┘   │
+│                                                                 │
+│  RATE_LIMITS: TableDefinition<&str, &[u8]>                      │
+│  ┌─────────────────┬────────────────────────────────────────┐   │
+│  │ Key (user_id)   │ Value (RateLimitRecord serialized)     │   │
+│  │ "a1b2c3..."     │ { backups_this_hour, backups_today,    │   │
+│  │                 │   hour_reset_at, day_reset_at }        │   │
+│  └─────────────────┴────────────────────────────────────────┘   │
+│                                                                 │
+│  USER_BACKUPS: TableDefinition<&str, &[u8]>                     │
+│  ┌─────────────────┬────────────────────────────────────────┐   │
+│  │ Key (user_id)   │ Value (Vec<storage_key> serialized)    │   │
+│  │ "a1b2c3..."     │ ["d4e5f6...", "g7h8i9..."]             │   │
+│  └─────────────────┴────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Security Layers
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Anti-Griefing Stack                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Layer 5: Envelope Validation + Entropy Check                   │
+│  ├── Requires { appId: "dailyreps-app", encrypted: "..." }      │
+│  ├── Rejects non-JSON envelope formats                          │
+│  └── Flags entropy < 0.75 (likely unencrypted data)             │
+│           │                                                     │
+│  Layer 4: Timestamp Validation                                  │
+│  ├── Request timestamp must be within ±5 minutes                │
+│  └── Prevents replay attacks                                    │
+│           │                                                     │
+│  Layer 3: HMAC Signature Verification                           │
+│  ├── HMAC-SHA256(data, APP_SECRET_KEY)                          │
+│  └── Proves request came from official app                      │
+│           │                                                     │
+│  Layer 2: Rate Limiting                                         │
+│  ├── 5 backups per hour per user                                │
+│  ├── 20 backups per day per user                                │
+│  └── Tracked in database, auto-resets                           │
+│           │                                                     │
+│  Layer 1: Size Limits                                           │
+│  ├── 5MB hard limit (413 error)                                 │
+│  └── 1MB warning threshold (logged)                             │
+│           │                                                     │
+│           ▼                                                     │
+│      [Request Accepted]                                         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## Technology Stack
 
 - **Framework**: [Axum 0.7](https://github.com/tokio-rs/axum) - Fast, ergonomic web framework
 - **Runtime**: [Tokio](https://tokio.rs/) - Async runtime
-- **Database**: PostgreSQL 16 with [SQLx 0.7](https://github.com/launchbadge/sqlx)
-- **Security**: HMAC-SHA256 for signatures, timestamp validation
+- **Database**: [redb 2.x](https://github.com/cberner/redb) - Embedded key-value store
+- **Serialization**: [bincode](https://github.com/bincode-org/bincode) - Binary encoding
+- **Security**: HMAC-SHA256 signatures, timestamp validation, entropy analysis
 - **CORS**: [tower-http](https://github.com/tower-rs/tower-http)
 
 ## API Endpoints
@@ -103,7 +234,7 @@ Store encrypted backup data.
 {
   "userId": "64-char-hex-sha256",
   "storageKey": "64-char-hex-sha256",
-  "data": "{\"encrypted\":\"base64...\",\"nonce\":\"base64...\"}",
+  "data": "{\"appId\":\"dailyreps-app\",\"encrypted\":\"base64...\"}",
   "signature": "64-char-hex-hmac-sha256",
   "timestamp": 1234567890
 }
@@ -118,6 +249,7 @@ Store encrypted backup data.
 ```
 
 **Errors:**
+- `400 Bad Request` - Invalid envelope format or suspicious entropy
 - `401 Unauthorized` - Invalid signature or timestamp
 - `404 Not Found` - User not registered
 - `413 Payload Too Large` - Data exceeds 5MB
@@ -131,14 +263,13 @@ Retrieve encrypted backup data.
 **Response:**
 ```json
 {
-  "data": "{\"encrypted\":\"base64...\",\"nonce\":\"base64...\"}",
+  "data": "{\"appId\":\"dailyreps-app\",\"encrypted\":\"base64...\"}",
   "updatedAt": "2025-01-01T12:00:00Z"
 }
 ```
 
 **Errors:**
 - `404 Not Found` - No backup found for this user
-- `401 Unauthorized` - Storage key doesn't match user
 
 ---
 
@@ -175,7 +306,8 @@ Health check endpoint.
 **Response:**
 ```json
 {
-  "status": "healthy"
+  "status": "healthy",
+  "database": "connected"
 }
 ```
 
@@ -184,21 +316,6 @@ Health check endpoint.
 ### Prerequisites
 
 - Rust 1.91+ (install via [rustup](https://rustup.rs/))
-- PostgreSQL 16+
-- OpenSSL (for HMAC)
-
-### Database Setup
-
-```bash
-# Create database
-createdb dailyreps_backup
-
-# Set DATABASE_URL
-export DATABASE_URL="postgresql://username:password@localhost/dailyreps_backup"
-
-# Run migrations
-sqlx migrate run
-```
 
 ### Configuration
 
@@ -206,17 +323,20 @@ Create `.env` file:
 
 ```bash
 # Server Configuration
-PORT=8080
-HOST=0.0.0.0
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8080
 
-# Database
-DATABASE_URL=postgresql://username:password@localhost/dailyreps_backup
+# Database (redb file path)
+DATABASE_PATH=./data/dailyreps.db
 
 # Security (MUST match client app)
 APP_SECRET_KEY=your-secret-key-here-generate-with-openssl-rand-hex-32
 
 # CORS (your client domain)
-ALLOWED_ORIGIN=https://your-app.netlify.app
+ALLOWED_ORIGINS=https://your-app.netlify.app
+
+# Environment
+ENVIRONMENT=production
 ```
 
 **Generate secure secret key:**
@@ -245,61 +365,57 @@ RUST_LOG=info cargo run
 ```
 dailyreps-backup-server/
 ├── src/
-│   ├── main.rs              # Server entry point, routes
+│   ├── main.rs              # Server entry point
 │   ├── config.rs            # Environment configuration
-│   ├── constants.rs         # Anti-griefing limits
+│   ├── constants.rs         # Limits & security constants
 │   ├── error.rs             # Custom error types
-│   ├── security.rs          # HMAC & timestamp validation
-│   ├── models/              # Data models
-│   │   ├── user.rs
-│   │   └── backup.rs
+│   ├── security.rs          # HMAC, timestamp, entropy validation
+│   ├── models/
+│   │   ├── mod.rs
+│   │   ├── user.rs          # User model
+│   │   ├── backup.rs        # Backup model
+│   │   └── rate_limit.rs    # Rate limit tracking
 │   ├── db/
-│   │   └── pool.rs          # Database connection
-│   └── routes/              # API endpoints
+│   │   ├── mod.rs           # Database init
+│   │   └── tables.rs        # Table definitions
+│   └── routes/
+│       ├── mod.rs
 │       ├── health.rs
 │       ├── register.rs
 │       ├── backup.rs
 │       └── delete.rs
-├── migrations/              # SQL migrations
-│   ├── 20251209000001_create_users.sql
-│   ├── 20251209000002_create_backups.sql
-│   └── 20251209000003_create_rate_limits.sql
 ├── Cargo.toml
-├── CLAUDE.md               # Development guide
-└── IMPLEMENTATION_PLAN.md  # Implementation status
+├── Dockerfile
+├── fly.toml                 # Fly.io deployment config
+├── CLAUDE.md                # Development guide
+└── IMPLEMENTATION_PLAN.md   # Implementation status
 ```
 
-### Anti-Griefing Measures
+### Running Tests
 
-**Layer 1: Size Limits**
-- 5MB hard limit on payload size
-- 1MB warning threshold logged
-- Defined in `src/constants.rs`
+```bash
+# Run all tests
+cargo test
 
-**Layer 2: Rate Limiting**
-- 5 backups per hour per user
-- 20 backups per day per user
-- Database-backed tracking in `user_rate_limits` table
-- Automatic reset at hour/day boundaries
+# Run with output
+cargo test -- --nocapture
 
-**Layer 3: HMAC Signatures**
-- All requests must include HMAC-SHA256 signature
-- Proves data comes from official app
-- Uses shared `APP_SECRET_KEY`
+# Run specific test
+cargo test test_name
+```
 
-**Layer 4: Timestamp Validation**
-- Requests must include current Unix timestamp
-- Must be within 5-minute window (±300 seconds)
-- Prevents replay attacks
+### Code Quality
 
-### Testing
+```bash
+# Format code
+cargo fmt
 
-Currently focused on integration testing via client test suite. Future work includes:
+# Run linter
+cargo clippy -- -D warnings
 
-- [ ] Unit tests for crypto validation
-- [ ] Integration tests for API endpoints
-- [ ] Load testing for rate limits
-- [ ] Security audit
+# Full quality check
+cargo fmt && cargo clippy -- -D warnings && cargo test
+```
 
 ## Deployment
 
@@ -312,12 +428,12 @@ curl -L https://fly.io/install.sh | sh
 # Login
 fly auth login
 
-# Create app
-fly launch
+# Create volume for database
+fly volumes create dailyreps_data --region iad --size 1
 
 # Set secrets
 fly secrets set APP_SECRET_KEY=your-secret-here
-fly secrets set DATABASE_URL=postgres://...
+fly secrets set ALLOWED_ORIGINS=https://your-app.netlify.app
 
 # Deploy
 fly deploy
@@ -325,147 +441,51 @@ fly deploy
 
 ### Docker
 
-```dockerfile
-FROM rust:1.91 as builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release
-
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y libpq5 ca-certificates
-COPY --from=builder /app/target/release/dailyreps-backup-server /usr/local/bin/
-CMD ["dailyreps-backup-server"]
-```
-
-### Environment Variables (Production)
-
 ```bash
-# Required
-DATABASE_URL=postgresql://...
-APP_SECRET_KEY=xxx  # Must match client
-ALLOWED_ORIGIN=https://your-app.com
+# Build
+docker build -t dailyreps-backup-server .
 
-# Optional
-PORT=8080
-HOST=0.0.0.0
-RUST_LOG=info
+# Run
+docker run -d \
+  -p 8080:8080 \
+  -v dailyreps_data:/data \
+  -e APP_SECRET_KEY=xxx \
+  -e ALLOWED_ORIGINS=https://your-app.com \
+  dailyreps-backup-server
 ```
 
 ## Security Considerations
 
 ### What the Server Can See
-- ✅ Encrypted data blobs (AES-GCM ciphertext)
-- ✅ SHA-256 hashes (userIds, storageKeys)
-- ✅ Timestamps and rate limit counters
-- ✅ Request metadata (IP, timing, etc.)
+- Encrypted data blobs (AES-GCM ciphertext)
+- SHA-256 hashes (userIds, storageKeys)
+- Timestamps and rate limit counters
+- Request metadata (timing, size)
 
 ### What the Server CANNOT See
-- ❌ Plaintext workout data
-- ❌ Encryption keys (PBKDF2 derived)
-- ❌ Original usernames
-- ❌ Passwords
-- ❌ Any unencrypted user information
+- Plaintext workout data
+- Encryption keys (PBKDF2 derived client-side)
+- Original usernames
+- Passwords
+- Any unencrypted user information
 
 ### Threat Model
 
 **Protected Against:**
-- ✅ Unauthorized data access (server admin can't read data)
-- ✅ Replay attacks (timestamp validation)
-- ✅ Fake clients (HMAC signatures)
-- ✅ Storage abuse (size limits, rate limiting)
-- ✅ User enumeration (consistent error messages)
+- Unauthorized data access (server admin can't read data)
+- Replay attacks (timestamp validation)
+- Fake clients (HMAC signatures + envelope validation)
+- Storage abuse (size limits, rate limiting, entropy check)
+- User enumeration (consistent error messages)
 
 **Not Protected Against:**
-- ⚠️ Client compromise (if client is hacked, keys are exposed)
-- ⚠️ Weak passwords (use strong passwords!)
-- ⚠️ Physical device access (data encrypted at rest in DB recommended)
-
-### Recommendations
-
-1. **Use TLS/HTTPS** - Encrypt all network traffic
-2. **Rotate secrets** - Change APP_SECRET_KEY periodically
-3. **Monitor logs** - Watch for suspicious patterns
-4. **Database encryption** - Enable PostgreSQL encryption at rest
-5. **Regular backups** - Back up the PostgreSQL database
-6. **Firewall rules** - Limit database access to app server only
-
-## Monitoring & Logging
-
-```bash
-# Development logging
-RUST_LOG=debug cargo run
-
-# Production logging (structured)
-RUST_LOG=info cargo run
-
-# Log levels by module
-RUST_LOG=dailyreps_backup_server=debug,axum=info cargo run
-```
-
-**Key log events:**
-- User registration
-- Backup operations (save/restore)
-- Rate limit warnings
-- Security validation failures
-- Large payload warnings (>1MB)
-
-## Troubleshooting
-
-### Database Connection Issues
-
-```bash
-# Test connection
-psql $DATABASE_URL
-
-# Check migrations
-sqlx migrate info
-```
-
-### HMAC Signature Mismatches
-
-- Ensure `APP_SECRET_KEY` matches between client and server
-- Check timestamp synchronization
-- Verify request body hasn't been modified in transit
-
-### Rate Limit Issues
-
-```sql
--- Check user rate limits
-SELECT * FROM user_rate_limits WHERE user_id = 'xxx';
-
--- Reset for testing
-UPDATE user_rate_limits SET backups_this_hour = 0, backups_today = 0;
-```
-
-## Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure `cargo clippy` passes
-5. Format with `cargo fmt`
-6. Submit a Pull Request
+- Client compromise (if client is hacked, keys are exposed)
+- Weak passwords (use strong passwords!)
 
 ## License
 
 MIT License - see LICENSE file for details
 
-## Related Projects
-
-- **DailyReps** - Frontend workout tracking app
-  - Repository: [gavlu/dailyreps](https://github.com/gavlu/dailyreps)
-  - Tech: SvelteKit, TypeScript, Web Crypto API
-
-## Acknowledgments
-
-- Built with [Axum](https://github.com/tokio-rs/axum)
-- Powered by [Tokio](https://tokio.rs/)
-- Database via [SQLx](https://github.com/launchbadge/sqlx)
-
 ---
 
 **Built for privacy-conscious fitness enthusiasts**
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
