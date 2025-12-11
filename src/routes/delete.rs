@@ -1,10 +1,12 @@
 use axum::{extract::State, Json};
+use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, Result};
-use crate::models::User;
-use crate::security::{validate_timestamp, verify_hmac};
 use crate::constants::MAX_TIMESTAMP_AGE_SECS;
+use crate::db::tables;
+use crate::error::{AppError, Result};
+use crate::models::{BackupRecord, User};
+use crate::security::{validate_timestamp, verify_hmac};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -29,12 +31,13 @@ pub struct DeleteUserResponse {
 /// - User record
 /// - All backup data
 /// - Rate limit records
+/// - User backups index
 ///
 /// # Security
 /// - Requires HMAC signature verification
 /// - Requires timestamp validation
 /// - Validates user ID and storage key formats
-/// - Cascading delete removes all associated data (via FK constraints)
+/// - Verifies storage key belongs to user (proves password knowledge)
 ///
 /// # Note
 /// This action is irreversible. All encrypted backup data will be permanently deleted.
@@ -72,59 +75,81 @@ pub async fn delete_user(
         ));
     }
 
-    // 4. Verify user exists
-    let user_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)"
-    )
-    .bind(&payload.user_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let db = state.db.clone();
+    let user_id = payload.user_id.clone();
+    let storage_key = payload.storage_key.clone();
 
-    if !user_exists {
-        tracing::warn!("Delete attempt for non-existent user: {}", payload.user_id);
-        return Err(AppError::UserNotFound);
-    }
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let write_txn = db.begin_write()?;
+        {
+            // 4. Verify user exists
+            let mut users = write_txn.open_table(tables::USERS)?;
+            if users.get(user_id.as_str())?.is_none() {
+                tracing::warn!("Delete attempt for non-existent user: {}", user_id);
+                return Err(AppError::UserNotFound);
+            }
 
-    // 5. Verify the storage key belongs to this user
-    // This proves they have the password (since storageKey = SHA256(userId + password))
-    let backup_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM backups WHERE user_id = $1 AND storage_key = $2)"
-    )
-    .bind(&payload.user_id)
-    .bind(&payload.storage_key)
-    .fetch_one(&state.pool)
-    .await?;
+            // 5. Verify the storage key belongs to this user
+            // This proves they have the password (since storageKey = SHA256(userId + password))
+            let backups_table = write_txn.open_table(tables::BACKUPS)?;
+            if let Some(backup_bytes) = backups_table.get(storage_key.as_str())? {
+                let backup: BackupRecord = bincode::deserialize(backup_bytes.value())?;
+                if backup.user_id != user_id {
+                    tracing::warn!(
+                        "Delete attempt with mismatched storage key for user: {}",
+                        user_id
+                    );
+                    return Err(AppError::InvalidInput(
+                        "Invalid credentials - storage key does not match user".to_string(),
+                    ));
+                }
+            } else {
+                tracing::warn!(
+                    "Delete attempt with invalid storage key for user: {}",
+                    user_id
+                );
+                return Err(AppError::InvalidInput(
+                    "Invalid credentials - storage key does not match user".to_string(),
+                ));
+            }
+            drop(backups_table);
 
-    if !backup_exists {
-        tracing::warn!(
-            "Delete attempt with invalid storage key for user: {}",
-            payload.user_id
+            // 6. Get all backup keys for this user (for cascade delete)
+            let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
+            let backup_keys: Vec<String> = user_backups
+                .get(user_id.as_str())?
+                .map(|b| bincode::deserialize(b.value()).unwrap_or_default())
+                .unwrap_or_default();
+
+            // 7. Delete all backups
+            let mut backups = write_txn.open_table(tables::BACKUPS)?;
+            for key in &backup_keys {
+                backups.remove(key.as_str())?;
+            }
+            drop(backups);
+
+            // 8. Delete rate limits
+            let mut rate_limits = write_txn.open_table(tables::RATE_LIMITS)?;
+            rate_limits.remove(user_id.as_str())?;
+            drop(rate_limits);
+
+            // 9. Delete user_backups index
+            user_backups.remove(user_id.as_str())?;
+            drop(user_backups);
+
+            // 10. Delete user
+            users.remove(user_id.as_str())?;
+        }
+        write_txn.commit()?;
+
+        tracing::info!(
+            "User {} and all associated data successfully deleted",
+            user_id
         );
-        return Err(AppError::InvalidInput(
-            "Invalid credentials - storage key does not match user".to_string(),
-        ));
-    }
 
-    // 6. Delete user (cascading delete will remove backups and rate limits)
-    let result = sqlx::query!(
-        "DELETE FROM users WHERE id = $1",
-        payload.user_id
-    )
-    .execute(&state.pool)
-    .await?;
-
-    if result.rows_affected() == 0 {
-        tracing::error!(
-            "User {} existed but delete affected 0 rows",
-            payload.user_id
-        );
-        return Err(AppError::InternalError);
-    }
-
-    tracing::info!(
-        "User {} and all associated data successfully deleted",
-        payload.user_id
-    );
+        Ok(())
+    })
+    .await??;
 
     Ok(Json(DeleteUserResponse {
         success: true,

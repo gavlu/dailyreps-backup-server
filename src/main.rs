@@ -7,7 +7,7 @@ mod routes;
 mod security;
 
 use axum::{
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use std::net::SocketAddr;
@@ -15,13 +15,13 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use config::Config;
-use db::create_pool;
+use db::{open_database, Db};
 use routes::{delete_user, health_check, register_user, retrieve_backup, store_backup};
 
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: sqlx::PgPool,
+    pub db: Db,
     pub config: Config,
 }
 
@@ -47,13 +47,8 @@ async fn main() -> anyhow::Result<()> {
         config.server_address()
     );
 
-    // Create database connection pool
-    let pool = create_pool(&config.database_url).await?;
-
-    // Run migrations
-    tracing::info!("Running database migrations...");
-    sqlx::migrate!("./migrations").run(&pool).await?;
-    tracing::info!("Migrations complete");
+    // Open or create the embedded database
+    let db = open_database(&config.database_path)?;
 
     // Configure CORS
     let cors = CorsLayer::new()
@@ -73,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create app state
     let state = AppState {
-        pool: pool.clone(),
+        db,
         config: config.clone(),
     };
 
@@ -82,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_check))
         .route("/api/register", post(register_user))
         .route("/api/backup", post(store_backup).get(retrieve_backup))
-        .route("/api/user", axum::routing::delete(delete_user))
+        .route("/api/user", delete(delete_user))
         .layer(cors)
         .with_state(state);
 

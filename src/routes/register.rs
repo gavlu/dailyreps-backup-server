@@ -1,8 +1,11 @@
 use axum::{extract::State, Json};
+use chrono::Utc;
+use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
+use crate::db::tables;
 use crate::error::{AppError, Result};
-use crate::models::User;
+use crate::models::{User, UserRecord};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -36,29 +39,33 @@ pub async fn register_user(
         ));
     }
 
-    // Check if user already exists
-    let existing = sqlx::query_as!(
-        User,
-        "SELECT id, created_at FROM users WHERE id = $1",
-        payload.user_id
-    )
-    .fetch_optional(&state.pool)
-    .await?;
+    let user_id = payload.user_id.clone();
+    let db = state.db.clone();
 
-    if existing.is_some() {
-        tracing::info!("User already exists: {}", payload.user_id);
-        return Err(AppError::UserAlreadyExists);
-    }
+    tokio::task::spawn_blocking(move || {
+        let write_txn = db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(tables::USERS)?;
 
-    // Insert new user
-    sqlx::query!(
-        "INSERT INTO users (id) VALUES ($1)",
-        payload.user_id
-    )
-    .execute(&state.pool)
-    .await?;
+            // Check if user already exists
+            if table.get(user_id.as_str())?.is_some() {
+                tracing::info!("User already exists: {}", user_id);
+                return Err(AppError::UserAlreadyExists);
+            }
 
-    tracing::info!("New user registered: {}", payload.user_id);
+            // Insert new user
+            let record = UserRecord {
+                created_at: Utc::now().timestamp(),
+            };
+            let bytes = bincode::serialize(&record)?;
+            table.insert(user_id.as_str(), bytes.as_slice())?;
+        }
+        write_txn.commit()?;
+
+        tracing::info!("New user registered: {}", user_id);
+        Ok(())
+    })
+    .await??;
 
     Ok(Json(RegisterResponse { success: true }))
 }

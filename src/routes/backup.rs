@@ -2,13 +2,14 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 
 use crate::constants::*;
+use crate::db::tables;
 use crate::error::{AppError, Result};
-use crate::models::{Backup, User};
+use crate::models::{Backup, BackupRecord, RateLimitRecord, User};
 use crate::security::{validate_timestamp, verify_hmac};
 use crate::AppState;
 
@@ -52,6 +53,11 @@ pub struct RetrieveBackupResponse {
 /// 2. HMAC signature: Proves data came from official app
 /// 3. Timestamp validation: Prevents replay attacks
 /// 4. Rate limiting: Max 5/hour, 20/day per user
+///
+/// # Future Enhancement: Compression Analysis
+/// The encrypted data format is preserved as base64-encoded AES-GCM output.
+/// Future compression analysis can be added here to detect anomalous data
+/// patterns that don't match expected JSON structure entropy.
 pub async fn store_backup(
     State(state): State<AppState>,
     Json(payload): Json<StoreBackupRequest>,
@@ -112,43 +118,75 @@ pub async fn store_backup(
         ));
     }
 
-    // 5. Verify user exists
-    let user_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)"
-    )
-    .bind(&payload.user_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let db = state.db.clone();
+    let user_id = payload.user_id.clone();
+    let storage_key = payload.storage_key.clone();
+    let data = payload.data.clone();
 
-    if !user_exists {
-        tracing::warn!("Backup attempt for non-existent user: {}", payload.user_id);
-        return Err(AppError::UserNotFound);
-    }
+    let updated_at = tokio::task::spawn_blocking(move || -> Result<i64> {
+        let now = Utc::now().timestamp();
 
-    // 6. Check rate limits
-    check_rate_limits(&state.pool, &payload.user_id).await?;
+        let write_txn = db.begin_write()?;
+        {
+            // 5. Verify user exists
+            let users = write_txn.open_table(tables::USERS)?;
+            if users.get(user_id.as_str())?.is_none() {
+                tracing::warn!("Backup attempt for non-existent user: {}", user_id);
+                return Err(AppError::UserNotFound);
+            }
+            drop(users);
 
-    // 7. Upsert backup (insert or update if exists)
-    let now = Utc::now();
-    sqlx::query!(
-        r#"
-        INSERT INTO backups (storage_key, user_id, encrypted_data, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $4)
-        ON CONFLICT (storage_key)
-        DO UPDATE SET
-            encrypted_data = EXCLUDED.encrypted_data,
-            updated_at = EXCLUDED.updated_at
-        "#,
-        payload.storage_key,
-        payload.user_id,
-        payload.data,
-        now
-    )
-    .execute(&state.pool)
-    .await?;
+            // 6. Check and update rate limits
+            let mut rate_limits = write_txn.open_table(tables::RATE_LIMITS)?;
+            let mut rate_record = match rate_limits.get(user_id.as_str())? {
+                Some(bytes) => bincode::deserialize(bytes.value())?,
+                None => RateLimitRecord::new(now),
+            };
 
-    // 8. Update rate limit counters
-    update_rate_limits(&state.pool, &payload.user_id).await?;
+            // This will return Err(RateLimitExceeded) if limits are exceeded
+            rate_record.check_and_increment(now)?;
+
+            let rate_bytes = bincode::serialize(&rate_record)?;
+            rate_limits.insert(user_id.as_str(), rate_bytes.as_slice())?;
+            drop(rate_limits);
+
+            // 7. Upsert backup (insert or update if exists)
+            let mut backups = write_txn.open_table(tables::BACKUPS)?;
+            let created_at = backups
+                .get(storage_key.as_str())?
+                .map(|b| bincode::deserialize::<BackupRecord>(b.value()).ok())
+                .flatten()
+                .map(|r| r.created_at)
+                .unwrap_or(now);
+
+            let backup_record = BackupRecord {
+                user_id: user_id.clone(),
+                encrypted_data: data,
+                created_at,
+                updated_at: now,
+            };
+            let backup_bytes = bincode::serialize(&backup_record)?;
+            backups.insert(storage_key.as_str(), backup_bytes.as_slice())?;
+            drop(backups);
+
+            // 8. Update user_backups index (for cascade delete)
+            let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
+            let mut keys: Vec<String> = user_backups
+                .get(user_id.as_str())?
+                .map(|b| bincode::deserialize(b.value()).unwrap_or_default())
+                .unwrap_or_default();
+
+            if !keys.contains(&storage_key) {
+                keys.push(storage_key.clone());
+                let keys_bytes = bincode::serialize(&keys)?;
+                user_backups.insert(user_id.as_str(), keys_bytes.as_slice())?;
+            }
+        }
+        write_txn.commit()?;
+
+        Ok(now)
+    })
+    .await??;
 
     tracing::info!(
         "Backup stored for user {}: {} bytes",
@@ -156,9 +194,12 @@ pub async fn store_backup(
         payload_size
     );
 
+    let updated_at_dt = DateTime::from_timestamp(updated_at, 0)
+        .unwrap_or_else(|| Utc::now());
+
     Ok(Json(StoreBackupResponse {
         success: true,
-        updated_at: now.to_rfc3339(),
+        updated_at: updated_at_dt.to_rfc3339(),
     }))
 }
 
@@ -180,154 +221,40 @@ pub async fn retrieve_backup(
         ));
     }
 
-    // Fetch backup
-    let backup = sqlx::query_as!(
-        Backup,
-        r#"
-        SELECT storage_key, user_id, encrypted_data, created_at, updated_at
-        FROM backups
-        WHERE storage_key = $1 AND user_id = $2
-        "#,
-        params.storage_key,
-        params.user_id
-    )
-    .fetch_optional(&state.pool)
-    .await?;
+    let db = state.db.clone();
+    let storage_key = params.storage_key.clone();
+    let user_id = params.user_id.clone();
 
-    match backup {
-        Some(b) => {
-            tracing::info!(
-                "Backup retrieved for user {}: {} bytes",
-                params.user_id,
-                b.encrypted_data.len()
-            );
+    let result = tokio::task::spawn_blocking(move || -> Result<BackupRecord> {
+        let read_txn = db.begin_read()?;
+        let backups = read_txn.open_table(tables::BACKUPS)?;
 
-            Ok(Json(RetrieveBackupResponse {
-                data: b.encrypted_data,
-                updated_at: b.updated_at.to_rfc3339(),
-            }))
+        let record: BackupRecord = backups
+            .get(storage_key.as_str())?
+            .map(|b| bincode::deserialize(b.value()))
+            .transpose()?
+            .ok_or_else(|| AppError::BackupNotFound)?;
+
+        // Verify user_id matches (security check)
+        if record.user_id != user_id {
+            return Err(AppError::BackupNotFound);
         }
-        None => {
-            tracing::info!(
-                "Backup not found for user {} with storage_key {}",
-                params.user_id,
-                params.storage_key
-            );
-            Err(AppError::BackupNotFound)
-        }
-    }
-}
 
-/// Check if user has exceeded rate limits
-async fn check_rate_limits(pool: &PgPool, user_id: &str) -> Result<()> {
-    let now = Utc::now();
+        Ok(record)
+    })
+    .await??;
 
-    // Get or create rate limit record
-    let rate_limit = sqlx::query!(
-        r#"
-        SELECT backups_this_hour, backups_today, hour_reset_at, day_reset_at
-        FROM user_rate_limits
-        WHERE user_id = $1
-        "#,
-        user_id
-    )
-    .fetch_optional(pool)
-    .await?;
+    tracing::info!(
+        "Backup retrieved for user {}: {} bytes",
+        params.user_id,
+        result.encrypted_data.len()
+    );
 
-    match rate_limit {
-        Some(record) => {
-            // Reset counters if time windows have expired
-            let mut hour_count = record.backups_this_hour;
-            let mut day_count = record.backups_today;
+    let updated_at_dt = DateTime::from_timestamp(result.updated_at, 0)
+        .unwrap_or_else(|| Utc::now());
 
-            if now > record.hour_reset_at {
-                hour_count = 0;
-            }
-
-            if now > record.day_reset_at {
-                day_count = 0;
-            }
-
-            // Check limits
-            if hour_count >= MAX_BACKUPS_PER_HOUR {
-                tracing::warn!(
-                    "Hourly rate limit exceeded for user {}: {}/{}",
-                    user_id,
-                    hour_count,
-                    MAX_BACKUPS_PER_HOUR
-                );
-                return Err(AppError::RateLimitExceeded);
-            }
-
-            if day_count >= MAX_BACKUPS_PER_DAY {
-                tracing::warn!(
-                    "Daily rate limit exceeded for user {}: {}/{}",
-                    user_id,
-                    day_count,
-                    MAX_BACKUPS_PER_DAY
-                );
-                return Err(AppError::RateLimitExceeded);
-            }
-
-            Ok(())
-        }
-        None => {
-            // First backup for this user - create record
-            sqlx::query!(
-                r#"
-                INSERT INTO user_rate_limits (
-                    user_id,
-                    backups_this_hour,
-                    backups_today,
-                    hour_reset_at,
-                    day_reset_at
-                )
-                VALUES ($1, 0, 0, $2, $3)
-                "#,
-                user_id,
-                now + chrono::Duration::hours(1),
-                now + chrono::Duration::days(1)
-            )
-            .execute(pool)
-            .await?;
-
-            Ok(())
-        }
-    }
-}
-
-/// Update rate limit counters after successful backup
-async fn update_rate_limits(pool: &PgPool, user_id: &str) -> Result<()> {
-    let now = Utc::now();
-
-    sqlx::query!(
-        r#"
-        UPDATE user_rate_limits
-        SET
-            backups_this_hour = CASE
-                WHEN $2 > hour_reset_at THEN 1
-                ELSE backups_this_hour + 1
-            END,
-            backups_today = CASE
-                WHEN $2 > day_reset_at THEN 1
-                ELSE backups_today + 1
-            END,
-            hour_reset_at = CASE
-                WHEN $2 > hour_reset_at THEN $2 + INTERVAL '1 hour'
-                ELSE hour_reset_at
-            END,
-            day_reset_at = CASE
-                WHEN $2 > day_reset_at THEN $2 + INTERVAL '1 day'
-                ELSE day_reset_at
-            END,
-            last_backup_at = $2
-        WHERE user_id = $1
-        "#,
-        user_id,
-        now
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    Ok(Json(RetrieveBackupResponse {
+        data: result.encrypted_data,
+        updated_at: updated_at_dt.to_rfc3339(),
+    }))
 }

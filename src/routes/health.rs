@@ -8,14 +8,19 @@ use crate::AppState;
 /// Returns the health status of the server and database connection.
 /// Used by load balancers and monitoring systems.
 pub async fn health_check(State(state): State<AppState>) -> Json<Value> {
-    // Check database connectivity
-    let db_status = match sqlx::query("SELECT 1").fetch_one(&state.pool).await {
-        Ok(_) => "connected",
-        Err(e) => {
-            tracing::error!("Database health check failed: {:?}", e);
-            "disconnected"
+    // Check database connectivity by attempting a read transaction
+    let db = state.db.clone();
+    let db_status = tokio::task::spawn_blocking(move || {
+        match db.begin_read() {
+            Ok(_) => "connected",
+            Err(e) => {
+                tracing::error!("Database health check failed: {:?}", e);
+                "disconnected"
+            }
         }
-    };
+    })
+    .await
+    .unwrap_or("error");
 
     Json(json!({
         "status": if db_status == "connected" { "healthy" } else { "unhealthy" },
