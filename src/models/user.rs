@@ -58,8 +58,10 @@ mod tests {
         };
 
         // Verify bincode serialization works
-        let bytes = bincode::serialize(&record).unwrap();
-        let deserialized: UserRecord = bincode::deserialize(&bytes).unwrap();
+        let config = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(&record, config).unwrap();
+        let (deserialized, _): (UserRecord, _) =
+            bincode::serde::decode_from_slice(&bytes, config).unwrap();
 
         assert_eq!(record.created_at, deserialized.created_at);
     }

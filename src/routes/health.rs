@@ -1,4 +1,5 @@
 use axum::{extract::State, Json};
+use redb::ReadableDatabase;
 use serde_json::{json, Value};
 
 use crate::AppState;

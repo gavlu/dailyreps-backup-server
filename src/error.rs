@@ -4,7 +4,6 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use std::boxed::Box;
 use thiserror::Error;
 
 /// Application error type
@@ -26,7 +25,10 @@ pub enum AppError {
     Commit(#[from] redb::CommitError),
 
     #[error("Serialization error: {0}")]
-    Serialization(#[from] Box<bincode::ErrorKind>),
+    Serialization(#[from] bincode::error::EncodeError),
+
+    #[error("Deserialization error: {0}")]
+    Deserialization(#[from] bincode::error::DecodeError),
 
     #[error("Task join error: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
@@ -85,6 +87,10 @@ impl IntoResponse for AppError {
             }
             AppError::Serialization(ref e) => {
                 tracing::error!("Serialization error: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+            }
+            AppError::Deserialization(ref e) => {
+                tracing::error!("Deserialization error: {:?}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
             }
             AppError::TaskJoin(ref e) => {

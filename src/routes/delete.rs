@@ -2,6 +2,8 @@ use axum::{extract::State, Json};
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
+const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
+
 use crate::constants::{ERR_INVALID_STORAGE_KEY, ERR_INVALID_USER_ID};
 use crate::db::tables;
 use crate::error::{AppError, Result};
@@ -84,7 +86,8 @@ pub async fn delete_user(
             // This proves they have the password (since storageKey = SHA256(userId + password))
             let backups_table = write_txn.open_table(tables::BACKUPS)?;
             if let Some(backup_bytes) = backups_table.get(storage_key.as_str())? {
-                let backup: BackupRecord = bincode::deserialize(backup_bytes.value())?;
+                let (backup, _): (BackupRecord, _) =
+                    bincode::serde::decode_from_slice(backup_bytes.value(), BINCODE_CONFIG)?;
                 if backup.user_id != peppered_user_id {
                     tracing::warn!("Delete attempt with mismatched storage key (peppered)");
                     return Err(AppError::InvalidInput(
@@ -103,7 +106,11 @@ pub async fn delete_user(
             let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
             let backup_keys: Vec<String> = user_backups
                 .get(peppered_user_id.as_str())?
-                .map(|b| bincode::deserialize(b.value()).unwrap_or_default())
+                .and_then(|b| {
+                    bincode::serde::decode_from_slice::<Vec<String>, _>(b.value(), BINCODE_CONFIG)
+                        .ok()
+                        .map(|(v, _)| v)
+                })
                 .unwrap_or_default();
 
             // 6. Delete all backups

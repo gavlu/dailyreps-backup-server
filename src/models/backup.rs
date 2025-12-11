@@ -61,8 +61,10 @@ mod tests {
         };
 
         // Verify bincode serialization works
-        let bytes = bincode::serialize(&record).unwrap();
-        let deserialized: BackupRecord = bincode::deserialize(&bytes).unwrap();
+        let config = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(&record, config).unwrap();
+        let (deserialized, _): (BackupRecord, _) =
+            bincode::serde::decode_from_slice(&bytes, config).unwrap();
 
         assert_eq!(record.user_id, deserialized.user_id);
         assert_eq!(record.encrypted_data, deserialized.encrypted_data);

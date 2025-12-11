@@ -3,6 +3,8 @@ use chrono::Utc;
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
+const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
+
 use crate::constants::ERR_USER_ID_MUST_BE_SHA256;
 use crate::db::tables;
 use crate::error::{AppError, Result};
@@ -69,7 +71,7 @@ pub async fn register_user(
             let record = UserRecord {
                 created_at: Utc::now().timestamp(),
             };
-            let bytes = bincode::serialize(&record)?;
+            let bytes = bincode::serde::encode_to_vec(&record, BINCODE_CONFIG)?;
             table.insert(peppered_user_id.as_str(), bytes.as_slice())?;
         }
         write_txn.commit()?;

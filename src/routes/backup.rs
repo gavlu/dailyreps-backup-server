@@ -3,8 +3,10 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
+
+const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard();
 
 use crate::constants::*;
 use crate::db::tables;
@@ -155,14 +157,18 @@ pub async fn store_backup(
             // 6. Check and update rate limits (using peppered ID)
             let mut rate_limits = write_txn.open_table(tables::RATE_LIMITS)?;
             let mut rate_record = match rate_limits.get(peppered_user_id.as_str())? {
-                Some(bytes) => bincode::deserialize(bytes.value())?,
+                Some(bytes) => {
+                    let (record, _): (RateLimitRecord, _) =
+                        bincode::serde::decode_from_slice(bytes.value(), BINCODE_CONFIG)?;
+                    record
+                }
                 None => RateLimitRecord::new(now),
             };
 
             // This will return Err(RateLimitExceeded) if limits are exceeded
             rate_record.check_and_increment(now)?;
 
-            let rate_bytes = bincode::serialize(&rate_record)?;
+            let rate_bytes = bincode::serde::encode_to_vec(&rate_record, BINCODE_CONFIG)?;
             rate_limits.insert(peppered_user_id.as_str(), rate_bytes.as_slice())?;
             drop(rate_limits);
 
@@ -172,7 +178,11 @@ pub async fn store_backup(
             let mut backups = write_txn.open_table(tables::BACKUPS)?;
             let created_at = backups
                 .get(storage_key.as_str())?
-                .and_then(|b| bincode::deserialize::<BackupRecord>(b.value()).ok())
+                .and_then(|b| {
+                    bincode::serde::decode_from_slice::<BackupRecord, _>(b.value(), BINCODE_CONFIG)
+                        .ok()
+                        .map(|(r, _)| r)
+                })
                 .map(|r| r.created_at)
                 .unwrap_or(now);
 
@@ -182,7 +192,7 @@ pub async fn store_backup(
                 created_at,
                 updated_at: now,
             };
-            let backup_bytes = bincode::serialize(&backup_record)?;
+            let backup_bytes = bincode::serde::encode_to_vec(&backup_record, BINCODE_CONFIG)?;
             backups.insert(storage_key.as_str(), backup_bytes.as_slice())?;
             drop(backups);
 
@@ -190,12 +200,16 @@ pub async fn store_backup(
             let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
             let mut keys: Vec<String> = user_backups
                 .get(peppered_user_id.as_str())?
-                .map(|b| bincode::deserialize(b.value()).unwrap_or_default())
+                .and_then(|b| {
+                    bincode::serde::decode_from_slice::<Vec<String>, _>(b.value(), BINCODE_CONFIG)
+                        .ok()
+                        .map(|(v, _)| v)
+                })
                 .unwrap_or_default();
 
             if !keys.contains(&storage_key) {
                 keys.push(storage_key.clone());
-                let keys_bytes = bincode::serialize(&keys)?;
+                let keys_bytes = bincode::serde::encode_to_vec(&keys, BINCODE_CONFIG)?;
                 user_backups.insert(peppered_user_id.as_str(), keys_bytes.as_slice())?;
             }
         }
@@ -243,7 +257,11 @@ pub async fn retrieve_backup(
 
         let record: BackupRecord = backups
             .get(storage_key.as_str())?
-            .map(|b| bincode::deserialize(b.value()))
+            .map(|b| {
+                bincode::serde::decode_from_slice(b.value(), BINCODE_CONFIG)
+                    .map(|(r, _)| r)
+                    .map_err(AppError::from)
+            })
             .transpose()?
             .ok_or_else(|| AppError::BackupNotFound)?;
 
