@@ -2,7 +2,7 @@
 
 ## Important Note on Free Tier
 
-Fly.io **no longer offers a free tier** to new customers as of 2024. New signups use **Pay As You Go** pricing. However, the costs for a small app like this are minimal (~$2-5/month).
+Fly.io **no longer offers a free tier** to new customers as of 2024. New signups use **Pay As You Go** pricing. However, the costs for this app are minimal (~$2/month) thanks to using an embedded database.
 
 ---
 
@@ -25,29 +25,28 @@ Fly.io **no longer offers a free tier** to new customers as of 2024. New signups
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         FLY.IO REGION (e.g., iad)                       │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                     PRIVATE WIREGUARD MESH                        │  │
-│  │                    (6PN internal networking)                      │  │
 │  │                                                                   │  │
-│  │   ┌─────────────────────┐         ┌─────────────────────┐        │  │
-│  │   │   APP MACHINE       │         │   POSTGRES MACHINE  │        │  │
-│  │   │   (Fly App)         │         │   (Fly Postgres)    │        │  │
-│  │   │                     │         │                     │        │  │
-│  │   │ ┌─────────────────┐ │  TCP    │ ┌─────────────────┐ │        │  │
-│  │   │ │ dailyreps-      │ │ ──────► │ │ PostgreSQL 16   │ │        │  │
-│  │   │ │ backup-server   │ │  5432   │ │                 │ │        │  │
-│  │   │ │                 │ │         │ │                 │ │        │  │
-│  │   │ │ (Rust/Axum)     │ │         │ └─────────────────┘ │        │  │
-│  │   │ └─────────────────┘ │         │          │          │        │  │
-│  │   │                     │         │          ▼          │        │  │
-│  │   │   shared-cpu-1x     │         │ ┌─────────────────┐ │        │  │
-│  │   │   256MB RAM         │         │ │  Volume (1GB+)  │ │        │  │
-│  │   │                     │         │ │  Persistent     │ │        │  │
-│  │   └─────────────────────┘         │ │  Storage        │ │        │  │
-│  │                                   │ └─────────────────┘ │        │  │
-│  │                                   │                     │        │  │
-│  │                                   │   shared-cpu-1x     │        │  │
-│  │                                   │   256MB RAM         │        │  │
-│  │                                   └─────────────────────┘        │  │
+│  │   ┌─────────────────────────────────────────────────────────┐     │  │
+│  │   │                    APP MACHINE                          │     │  │
+│  │   │                    (Fly App)                            │     │  │
+│  │   │                                                         │     │  │
+│  │   │   ┌─────────────────────────────────────────────────┐   │     │  │
+│  │   │   │           dailyreps-backup-server               │   │     │  │
+│  │   │   │                                                 │   │     │  │
+│  │   │   │   ┌─────────────┐      ┌─────────────────────┐  │   │     │  │
+│  │   │   │   │ Rust/Axum   │ ───► │  redb (embedded)    │  │   │     │  │
+│  │   │   │   │ HTTP Server │      │  Key-Value Store    │  │   │     │  │
+│  │   │   │   └─────────────┘      └─────────────────────┘  │   │     │  │
+│  │   │   │                                  │              │   │     │  │
+│  │   │   └──────────────────────────────────┼──────────────┘   │     │  │
+│  │   │                                      │                  │     │  │
+│  │   │      shared-cpu-1x                   ▼                  │     │  │
+│  │   │      256MB RAM            ┌─────────────────────┐       │     │  │
+│  │   │                           │  Volume (1GB)       │       │     │  │
+│  │   │                           │  /data/backup.redb  │       │     │  │
+│  │   │                           └─────────────────────┘       │     │  │
+│  │   └─────────────────────────────────────────────────────────┘     │  │
+│  │                                                                   │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -57,27 +56,25 @@ Fly.io **no longer offers a free tier** to new customers as of 2024. New signups
 ## Network Flow Detail
 
 ```
-┌──────────────┐      ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
-│   DailyReps  │      │   Fly.io     │      │   App        │      │   Postgres   │
-│   iOS App    │      │   Edge       │      │   Machine    │      │   Machine    │
-└──────┬───────┘      └──────┬───────┘      └──────┬───────┘      └──────┬───────┘
-       │                     │                     │                     │
-       │  HTTPS POST         │                     │                     │
-       │  /api/backup        │                     │                     │
-       │────────────────────►│                     │                     │
-       │                     │                     │                     │
-       │                     │  HTTP (internal)    │                     │
-       │                     │────────────────────►│                     │
-       │                     │                     │                     │
-       │                     │                     │  SQL Query          │
-       │                     │                     │  (internal 6PN)     │
-       │                     │                     │────────────────────►│
-       │                     │                     │                     │
-       │                     │                     │◄────────────────────│
-       │                     │                     │  Result             │
-       │                     │◄────────────────────│                     │
-       │◄────────────────────│                     │                     │
-       │  JSON Response      │                     │                     │
+┌──────────────┐      ┌──────────────┐      ┌──────────────────────────────┐
+│   DailyReps  │      │   Fly.io     │      │        App Machine           │
+│   iOS App    │      │   Edge       │      │  (Rust + embedded redb)      │
+└──────┬───────┘      └──────┬───────┘      └──────────────┬───────────────┘
+       │                     │                             │
+       │  HTTPS POST         │                             │
+       │  /api/backup        │                             │
+       │────────────────────►│                             │
+       │                     │                             │
+       │                     │  HTTP (internal)            │
+       │                     │────────────────────────────►│
+       │                     │                             │
+       │                     │                             │  Read/Write
+       │                     │                             │  to redb file
+       │                     │                             │  (in-process)
+       │                     │                             │
+       │                     │◄────────────────────────────│
+       │◄────────────────────│                             │
+       │  JSON Response      │                             │
 ```
 
 ---
@@ -89,24 +86,51 @@ Fly.io **no longer offers a free tier** to new customers as of 2024. New signups
 │                        YOUR FLY.IO ORGANIZATION                         │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│   APP 1: dailyreps-backup-server                                        │
-│   ├── Type: Fly App (your Rust binary in Docker)                        │
+│   APP: dailyreps-backup-server                                          │
+│   ├── Type: Fly App (Rust binary in Docker)                             │
 │   ├── Machine: shared-cpu-1x, 256MB RAM                                 │
+│   ├── Database: redb (embedded, in-process)                             │
+│   ├── Volume: 1GB persistent storage at /data                           │
 │   ├── Exposes: Port 8080 → HTTPS via Fly proxy                          │
 │   ├── URL: https://dailyreps-backup-server.fly.dev                      │
-│   └── Cost: ~$2/month (if running 24/7)                                 │
-│                                                                         │
-│   APP 2: dailyreps-backup-server-db  (auto-created by flyctl)           │
-│   ├── Type: Fly Postgres (unmanaged)                                    │
-│   ├── Machine: shared-cpu-1x, 256MB RAM                                 │
-│   ├── Volume: 1GB persistent storage                                    │
-│   ├── Internal only: postgres://...@dailyreps-backup-server-db.internal │
-│   └── Cost: ~$2/month + $0.15/GB storage                                │
+│   └── Cost: ~$2/month                                                   │
 │                                                                         │
 │   SECRETS (encrypted, injected as env vars):                            │
-│   ├── DATABASE_URL                                                      │
-│   ├── ALLOWED_ORIGINS                                                   │
-│   └── APP_SIGNING_SECRET                                                │
+│   ├── USER_ID_PEPPER (for hashing user IDs)                             │
+│   ├── APP_SECRET_KEY (for HMAC signature verification)                  │
+│   └── ALLOWED_ORIGINS (CORS whitelist)                                  │
+│                                                                         │
+│   VOLUME:                                                               │
+│   ├── Name: dailyreps_data                                              │
+│   ├── Mount: /data                                                      │
+│   ├── Contains: backup.redb (all user data)                             │
+│   └── Cost: ~$0.15/GB/month                                             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Technology Stack
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          APPLICATION STACK                              │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   Web Framework:     Axum 0.8                                           │
+│   Async Runtime:     Tokio 1.x                                          │
+│   Middleware:        Tower 0.5 / Tower-HTTP 0.6                         │
+│                                                                         │
+│   Database:          redb 3 (embedded key-value store)                  │
+│   Serialization:     bincode 2 (binary encoding for DB records)         │
+│                      serde_json (API request/response)                  │
+│                                                                         │
+│   Security:          sha2 (SHA-256 hashing)                             │
+│                      hmac (signature verification)                      │
+│                                                                         │
+│   Error Handling:    thiserror 2 / anyhow                               │
+│   Logging:           tracing / tracing-subscriber                       │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -134,6 +158,7 @@ Fly.io **no longer offers a free tier** to new customers as of 2024. New signups
        │                   │                   │                   │
        │                   │                   │     Deploy to     │
        │                   │                   │     Machine       │
+       │                   │                   │     (attach vol)  │
        │                   │                   │                   │
        │◄──────────────────┴───────────────────┴───────────────────│
        │  Deployed! https://dailyreps-backup-server.fly.dev        │
@@ -145,32 +170,58 @@ Fly.io **no longer offers a free tier** to new customers as of 2024. New signups
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  MINIMAL SETUP (Development)                                   │
+│  SINGLE-MACHINE SETUP (with embedded database)                 │
 ├────────────────────────────────────────────────────────────────┤
 │  App Machine (shared-cpu-1x, 256MB)      ~$1.94/month         │
-│  Postgres Machine (shared-cpu-1x, 256MB) ~$1.94/month         │
 │  Storage Volume (1GB)                    ~$0.15/month         │
 │  Outbound bandwidth (first 100GB free)   ~$0.00               │
 ├────────────────────────────────────────────────────────────────┤
-│  TOTAL                                   ~$4-5/month          │
+│  TOTAL                                   ~$2/month            │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
+## Why Embedded Database (redb)?
+
+| Aspect | PostgreSQL (old) | redb (current) |
+|--------|------------------|----------------|
+| **Cost** | ~$4/month (separate machine) | ~$2/month (single machine) |
+| **Latency** | Network hop to DB | In-process, zero network |
+| **Complexity** | 2 apps to manage | 1 app to manage |
+| **Backups** | Fly snapshots | Fly volume snapshots |
+| **Scaling** | Horizontal possible | Single-node only |
+
+For a personal backup service with low traffic, the embedded approach is simpler and cheaper.
+
+---
+
 ## Key Points
 
-1. **Two Fly Apps**: Your server and Postgres are separate Fly apps, each running in their own VM
-2. **Private Network**: They communicate over Fly's private WireGuard mesh (6PN) - Postgres is NOT exposed to internet
+1. **Single Fly App**: Server and database run in the same process - no separate database machine needed
+2. **Persistent Volume**: Data survives restarts via Fly volume mounted at `/data`
 3. **TLS Handled**: Fly terminates HTTPS at their edge, your app receives plain HTTP internally
-4. **Single Region**: For cost savings, run both in one region (e.g., `iad` for US East)
-5. **Postgres is Unmanaged**: You're responsible for backups, updates, and maintenance (though Fly provides daily snapshots)
+4. **Single Region**: Run in one region (e.g., `iad` for US East) for lowest latency to your location
+5. **Zero-Knowledge**: All user data is encrypted client-side; server only stores encrypted blobs
+
+---
+
+## Environment Variables
+
+```bash
+# Required secrets (set via `fly secrets set`)
+USER_ID_PEPPER=<random-string>      # Protects user IDs in database
+APP_SECRET_KEY=<random-string>      # Verifies HMAC signatures from app
+
+# Optional
+ALLOWED_ORIGINS=https://dailyreps.app,http://localhost:5173
+DATABASE_PATH=/data/backup.redb     # Default path for redb file
+```
 
 ---
 
 ## References
 
 - [Fly.io Resource Pricing](https://fly.io/docs/about/pricing/)
-- [Fly Postgres (Unmanaged) Docs](https://fly.io/docs/postgres/)
-- [Free Postgres Blog Post](https://fly.io/blog/free-postgres/)
-- [Managed Postgres (MPG) Docs](https://fly.io/docs/mpg/)
+- [Fly.io Volumes](https://fly.io/docs/volumes/)
+- [redb - Rust Embedded Database](https://github.com/cberner/redb)

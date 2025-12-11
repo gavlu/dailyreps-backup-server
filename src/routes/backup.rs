@@ -13,7 +13,6 @@ use crate::db::tables;
 use crate::error::{AppError, Result};
 use crate::models::{Backup, BackupRecord, RateLimitRecord, User};
 use crate::routes::{timestamp_to_rfc3339, validate_signed_request};
-use crate::security::{analyze_backup_data, apply_pepper};
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -51,23 +50,16 @@ pub struct RetrieveBackupResponse {
 
 /// Store or update encrypted backup
 ///
-/// # Anti-Griefing Measures
-/// 1. Size limit: Maximum 5MB payload
-/// 2. HMAC signature: Proves data came from official app
-/// 3. Timestamp validation: Prevents replay attacks
-/// 4. Rate limiting: Max 5/hour, 20/day per user
-/// 5. Compression analysis: Detects anomalous data patterns (entropy check)
-///
-/// # Compression Analysis (Anomaly Detection)
-/// Analyzes the backup envelope format and entropy of encrypted data to detect:
-/// - Non-official clients (missing/wrong appId)
-/// - Random data padding (entropy too high)
-/// - Unencrypted data (entropy too low)
+/// # Security Measures
+/// 1. HMAC signature: Proves data came from official app
+/// 2. Timestamp validation: Prevents replay attacks
+/// 3. Rate limiting: Max 5/hour, 20/day per user
+/// 4. Size limit: Maximum 5MB payload
 pub async fn store_backup(
     State(state): State<AppState>,
     Json(payload): Json<StoreBackupRequest>,
 ) -> Result<Json<StoreBackupResponse>> {
-    // 1. Verify HMAC signature and timestamp (proves data from official app, prevents replay attacks)
+    // 1. Verify HMAC signature and timestamp
     validate_signed_request(
         &payload.data,
         &payload.signature,
@@ -75,25 +67,19 @@ pub async fn store_backup(
         &state.config.app_secret_key,
     )?;
 
-    // 2. Check payload size (prevent storage abuse)
+    // 2. Check payload size
     let payload_size = payload.data.len();
     if payload_size > MAX_BACKUP_SIZE_BYTES {
         tracing::warn!(
-            "Payload too large from user {}: {} bytes (max: {})",
-            payload.user_id,
+            "Payload too large: {} bytes (max: {})",
             payload_size,
             MAX_BACKUP_SIZE_BYTES
         );
         return Err(AppError::PayloadTooLarge);
     }
 
-    // Log warning for large payloads (monitoring)
     if payload_size > WARN_BACKUP_SIZE_BYTES {
-        tracing::info!(
-            "Large backup from user {}: {} bytes",
-            payload.user_id,
-            payload_size
-        );
+        tracing::info!("Large backup: {} bytes", payload_size);
     }
 
     // 3. Validate user ID and storage key formats
@@ -105,39 +91,8 @@ pub async fn store_backup(
         return Err(AppError::InvalidInput(ERR_INVALID_STORAGE_KEY.to_string()));
     }
 
-    // 4. Compression analysis (anomaly detection)
-    // Validates envelope format and checks entropy of encrypted data
-    let analysis = analyze_backup_data(&payload.data).map_err(AppError::InvalidBackupFormat)?;
-
-    // Log entropy analysis results
-    if analysis.data_size >= MIN_SIZE_FOR_ENTROPY_CHECK {
-        tracing::debug!(
-            "Backup entropy for user {}: {:.3} (size: {} bytes)",
-            payload.user_id,
-            analysis.entropy_ratio,
-            analysis.data_size
-        );
-    }
-
-    // Reject backups that fail entropy check (suspicious patterns)
-    if !analysis.passes_entropy_check {
-        tracing::warn!(
-            "Rejecting backup from user {} due to suspicious entropy: {:.3}",
-            payload.user_id,
-            analysis.entropy_ratio
-        );
-        return Err(AppError::SuspiciousDataPattern);
-    }
-
-    // Log any warnings (for monitoring)
-    if let Some(warning) = &analysis.warning {
-        tracing::info!("Backup warning for user: {}", warning);
-    }
-
-    // Apply server-side pepper to user ID for database lookups
-    let peppered_user_id = apply_pepper(&payload.user_id, &state.config.user_id_pepper);
-
     let db = state.db.clone();
+    let user_id = payload.user_id.clone();
     let storage_key = payload.storage_key.clone();
     let data = payload.data.clone();
 
@@ -146,17 +101,17 @@ pub async fn store_backup(
 
         let write_txn = db.begin_write()?;
         {
-            // 5. Verify user exists (using peppered ID)
+            // 4. Verify user exists
             let users = write_txn.open_table(tables::USERS)?;
-            if users.get(peppered_user_id.as_str())?.is_none() {
-                tracing::warn!("Backup attempt for non-existent user (peppered)");
+            if users.get(user_id.as_str())?.is_none() {
+                tracing::warn!("Backup attempt for non-existent user");
                 return Err(AppError::UserNotFound);
             }
             drop(users);
 
-            // 6. Check and update rate limits (using peppered ID)
+            // 5. Check and update rate limits
             let mut rate_limits = write_txn.open_table(tables::RATE_LIMITS)?;
-            let mut rate_record = match rate_limits.get(peppered_user_id.as_str())? {
+            let mut rate_record = match rate_limits.get(user_id.as_str())? {
                 Some(bytes) => {
                     let (record, _): (RateLimitRecord, _) =
                         bincode::serde::decode_from_slice(bytes.value(), BINCODE_CONFIG)?;
@@ -165,16 +120,13 @@ pub async fn store_backup(
                 None => RateLimitRecord::new(now),
             };
 
-            // This will return Err(RateLimitExceeded) if limits are exceeded
             rate_record.check_and_increment(now)?;
 
             let rate_bytes = bincode::serde::encode_to_vec(&rate_record, BINCODE_CONFIG)?;
-            rate_limits.insert(peppered_user_id.as_str(), rate_bytes.as_slice())?;
+            rate_limits.insert(user_id.as_str(), rate_bytes.as_slice())?;
             drop(rate_limits);
 
-            // 7. Upsert backup (insert or update if exists)
-            // Note: storage_key is NOT peppered - it's derived from userId+password
-            // and the client needs to be able to reconstruct it
+            // 6. Upsert backup
             let mut backups = write_txn.open_table(tables::BACKUPS)?;
             let created_at = backups
                 .get(storage_key.as_str())?
@@ -187,7 +139,7 @@ pub async fn store_backup(
                 .unwrap_or(now);
 
             let backup_record = BackupRecord {
-                user_id: peppered_user_id.clone(), // Store peppered user ID
+                user_id: user_id.clone(),
                 encrypted_data: data,
                 created_at,
                 updated_at: now,
@@ -196,10 +148,10 @@ pub async fn store_backup(
             backups.insert(storage_key.as_str(), backup_bytes.as_slice())?;
             drop(backups);
 
-            // 8. Update user_backups index (for cascade delete, using peppered ID)
+            // 7. Update user_backups index
             let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
             let mut keys: Vec<String> = user_backups
-                .get(peppered_user_id.as_str())?
+                .get(user_id.as_str())?
                 .and_then(|b| {
                     bincode::serde::decode_from_slice::<Vec<String>, _>(b.value(), BINCODE_CONFIG)
                         .ok()
@@ -210,7 +162,7 @@ pub async fn store_backup(
             if !keys.contains(&storage_key) {
                 keys.push(storage_key.clone());
                 let keys_bytes = bincode::serde::encode_to_vec(&keys, BINCODE_CONFIG)?;
-                user_backups.insert(peppered_user_id.as_str(), keys_bytes.as_slice())?;
+                user_backups.insert(user_id.as_str(), keys_bytes.as_slice())?;
             }
         }
         write_txn.commit()?;
@@ -219,11 +171,7 @@ pub async fn store_backup(
     })
     .await??;
 
-    tracing::info!(
-        "Backup stored for user {}: {} bytes",
-        payload.user_id,
-        payload_size
-    );
+    tracing::info!("Backup stored: {} bytes", payload_size);
 
     Ok(Json(StoreBackupResponse {
         success: true,
@@ -236,7 +184,6 @@ pub async fn retrieve_backup(
     State(state): State<AppState>,
     Query(params): Query<RetrieveBackupParams>,
 ) -> Result<Json<RetrieveBackupResponse>> {
-    // Validate formats
     if !User::validate_id(&params.user_id) {
         return Err(AppError::InvalidInput(ERR_INVALID_USER_ID.to_string()));
     }
@@ -245,10 +192,8 @@ pub async fn retrieve_backup(
         return Err(AppError::InvalidInput(ERR_INVALID_STORAGE_KEY.to_string()));
     }
 
-    // Apply server-side pepper to user ID for database lookups
-    let peppered_user_id = apply_pepper(&params.user_id, &state.config.user_id_pepper);
-
     let db = state.db.clone();
+    let user_id = params.user_id.clone();
     let storage_key = params.storage_key.clone();
 
     let result = tokio::task::spawn_blocking(move || -> Result<BackupRecord> {
@@ -265,8 +210,8 @@ pub async fn retrieve_backup(
             .transpose()?
             .ok_or_else(|| AppError::BackupNotFound)?;
 
-        // Verify peppered user_id matches (security check)
-        if record.user_id != peppered_user_id {
+        // Verify user_id matches
+        if record.user_id != user_id {
             return Err(AppError::BackupNotFound);
         }
 

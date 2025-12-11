@@ -8,7 +8,6 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use dailyreps_backup_server::security::base64_encode;
 use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
 use redb::Database;
@@ -19,9 +18,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 // Test configuration constants
-const TEST_PEPPER: &str = "test-pepper";
 const TEST_SECRET: &str = "test-secret-key";
-const EXPECTED_APP_ID: &str = "dailyreps-app";
 
 // =============================================================================
 // Test Helpers
@@ -40,7 +37,6 @@ fn test_config() -> dailyreps_backup_server::Config {
         register_rate_limit_window_secs: 60,
         environment: "test".to_string(),
         app_secret_key: TEST_SECRET.to_string(),
-        user_id_pepper: TEST_PEPPER.to_string(),
     }
 }
 
@@ -111,25 +107,11 @@ fn generate_hmac_signature(data: &str, secret: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Generate valid encrypted backup envelope with good entropy
+/// Generate valid backup data (any string - server just stores it)
 fn generate_valid_backup_data() -> String {
-    // Create pseudo-random data with good entropy (simulating encrypted data)
-    let encrypted_bytes: Vec<u8> = (0u64..512)
-        .map(|i| {
-            let x = i.wrapping_mul(1103515245).wrapping_add(12345);
-            (x % 256) as u8
-        })
-        .collect();
-
-    // Base64 encode
-    let encrypted_b64 = base64_encode(&encrypted_bytes);
-
-    // Wrap in envelope
-    json!({
-        "appId": EXPECTED_APP_ID,
-        "encrypted": encrypted_b64
-    })
-    .to_string()
+    // The server stores whatever data the client sends (after HMAC verification)
+    // In production, this would be encrypted data from the client
+    format!("encrypted-backup-data-{}", rand_bytes())
 }
 
 /// Parse response body as JSON
@@ -473,50 +455,6 @@ async fn test_store_backup_nonexistent_user() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn test_store_backup_invalid_envelope_format() {
-    let temp_dir = TempDir::new().unwrap();
-    let db = create_test_db(&temp_dir);
-    let app = create_test_app(db.clone());
-
-    // Register user first
-    let user_id = generate_user_id();
-    let register_body = json!({ "userId": user_id });
-    let _ = app
-        .oneshot(make_post_request(
-            "/api/register",
-            register_body.to_string(),
-        ))
-        .await
-        .unwrap();
-
-    // Try to store backup with wrong app ID
-    let app = create_test_app(db);
-    let storage_key = generate_storage_key(&user_id, "test-password");
-    let data = json!({
-        "appId": "wrong-app",
-        "encrypted": "SGVsbG8gV29ybGQ="
-    })
-    .to_string();
-    let timestamp = chrono::Utc::now().timestamp();
-    let signature = generate_hmac_signature(&data, TEST_SECRET);
-
-    let backup_body = json!({
-        "userId": user_id,
-        "storageKey": storage_key,
-        "data": data,
-        "signature": signature,
-        "timestamp": timestamp
-    });
-
-    let response = app
-        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 // =============================================================================

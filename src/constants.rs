@@ -33,37 +33,3 @@ pub const ERR_INVALID_TIMESTAMP: &str = "Timestamp too old or in the future";
 /// Detailed error message for user ID validation in registration
 pub const ERR_USER_ID_MUST_BE_SHA256: &str =
     "User ID must be a valid SHA-256 hash (64 hex characters)";
-
-// =============================================================================
-// Compression Analysis Constants (Anomaly Detection)
-// =============================================================================
-
-/// Expected app identifier for envelope validation
-/// Used to verify backups come from the official DailyReps app
-pub const EXPECTED_APP_ID: &str = "dailyreps-app";
-
-/// Minimum entropy ratio for valid encrypted JSON data
-///
-/// Encrypted data should have high entropy (close to 1.0). Data with low
-/// entropy is suspicious because it suggests:
-/// - Unencrypted data being uploaded
-/// - Poorly compressed repetitive data
-/// - Simple patterns that shouldn't be in properly encrypted data
-///
-/// We set 0.75 as a reasonable minimum - real AES-GCM encrypted data
-/// typically has entropy between 0.95-1.0.
-pub const MIN_ENTROPY_RATIO: f64 = 0.75;
-
-/// Maximum entropy ratio for valid encrypted JSON data
-///
-/// Set to 1.0 (disabled) because properly encrypted data should have
-/// entropy very close to 1.0. The envelope format validation (appId, version)
-/// is the primary protection against random data abuse, not entropy checking.
-///
-/// Note: A strict upper bound (like 0.995) would incorrectly reject valid
-/// encrypted data since AES-GCM produces near-perfect entropy.
-pub const MAX_ENTROPY_RATIO: f64 = 1.0;
-
-/// Minimum size for entropy analysis to be meaningful
-/// Very small payloads don't have enough data for reliable entropy calculation
-pub const MIN_SIZE_FOR_ENTROPY_CHECK: usize = 256;
