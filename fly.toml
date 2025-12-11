@@ -1,0 +1,30 @@
+# fly.toml - Fly.io deployment configuration
+# See https://fly.io/docs/reference/configuration/ for reference
+
+app = "dailyreps-backup-server"
+primary_region = "iad"
+
+[build]
+
+[env]
+  DATABASE_PATH = "/data/dailyreps.db"
+  SERVER_HOST = "0.0.0.0"
+  SERVER_PORT = "8080"
+  RUST_LOG = "info"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[[mounts]]
+  source = "dailyreps_data"
+  destination = "/data"
