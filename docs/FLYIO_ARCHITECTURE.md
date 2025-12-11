@@ -96,7 +96,6 @@ Fly.io **no longer offers a free tier** to new customers as of 2024. New signups
 │   └── Cost: ~$2/month                                                   │
 │                                                                         │
 │   SECRETS (encrypted, injected as env vars):                            │
-│   ├── USER_ID_PEPPER (for hashing user IDs)                             │
 │   ├── APP_SECRET_KEY (for HMAC signature verification)                  │
 │   └── ALLOWED_ORIGINS (CORS whitelist)                                  │
 │                                                                         │
@@ -210,7 +209,6 @@ For a personal backup service with low traffic, the embedded approach is simpler
 
 ```bash
 # Required secrets (set via `fly secrets set`)
-USER_ID_PEPPER=<random-string>      # Protects user IDs in database
 APP_SECRET_KEY=<random-string>      # Verifies HMAC signatures from app
 
 # Optional
