@@ -242,6 +242,38 @@ pub fn analyze_backup_data(data: &str) -> Result<CompressionAnalysis, String> {
     })
 }
 
+/// Simple base64 encoder
+///
+/// Encodes binary data to standard base64 (with + and /).
+/// This is public for use in tests.
+pub fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::new();
+
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+
+        result.push(ALPHABET[b0 >> 2] as char);
+        result.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
+
+        if chunk.len() > 1 {
+            result.push(ALPHABET[((b1 & 0x0f) << 2) | (b2 >> 6)] as char);
+        } else {
+            result.push('=');
+        }
+
+        if chunk.len() > 2 {
+            result.push(ALPHABET[b2 & 0x3f] as char);
+        } else {
+            result.push('=');
+        }
+    }
+
+    result
+}
+
 /// Simple base64 decoder
 ///
 /// Decodes standard base64 (with + and /) as well as URL-safe base64.
@@ -444,35 +476,6 @@ mod tests {
     // Compression Analysis Tests
     // =========================================================================
 
-    /// Helper to create a simple base64 encoding
-    fn simple_base64_encode(data: &[u8]) -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut result = String::new();
-
-        for chunk in data.chunks(3) {
-            let b0 = chunk[0] as usize;
-            let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
-            let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
-
-            result.push(ALPHABET[b0 >> 2] as char);
-            result.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
-
-            if chunk.len() > 1 {
-                result.push(ALPHABET[((b1 & 0x0f) << 2) | (b2 >> 6)] as char);
-            } else {
-                result.push('=');
-            }
-
-            if chunk.len() > 2 {
-                result.push(ALPHABET[b2 & 0x3f] as char);
-            } else {
-                result.push('=');
-            }
-        }
-
-        result
-    }
-
     #[test]
     fn test_calculate_entropy_empty() {
         assert_eq!(calculate_entropy(&[]), 0.0);
@@ -563,7 +566,7 @@ mod tests {
 
         let envelope = serde_json::json!({
             "appId": EXPECTED_APP_ID,
-            "encrypted": simple_base64_encode(&encrypted_data)
+            "encrypted": base64_encode(&encrypted_data)
         });
 
         let result = analyze_backup_data(&envelope.to_string());
@@ -589,7 +592,7 @@ mod tests {
     fn test_analyze_backup_data_wrong_app_id() {
         let envelope = serde_json::json!({
             "appId": "wrong-app",
-            "encrypted": simple_base64_encode(b"test data")
+            "encrypted": base64_encode(b"test data")
         });
 
         let result = analyze_backup_data(&envelope.to_string());
@@ -624,7 +627,7 @@ mod tests {
 
         let envelope = serde_json::json!({
             "appId": EXPECTED_APP_ID,
-            "encrypted": simple_base64_encode(&low_entropy_data)
+            "encrypted": base64_encode(&low_entropy_data)
         });
 
         let result = analyze_backup_data(&envelope.to_string());
@@ -644,7 +647,7 @@ mod tests {
 
         let envelope = serde_json::json!({
             "appId": EXPECTED_APP_ID,
-            "encrypted": simple_base64_encode(&small_data)
+            "encrypted": base64_encode(&small_data)
         });
 
         let result = analyze_backup_data(&envelope.to_string());

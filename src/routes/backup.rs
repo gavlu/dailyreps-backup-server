@@ -270,10 +270,7 @@ pub async fn retrieve_backup(
     })
     .await??;
 
-    tracing::info!(
-        "Backup retrieved: {} bytes",
-        result.encrypted_data.len()
-    );
+    tracing::info!("Backup retrieved: {} bytes", result.encrypted_data.len());
 
     let updated_at_dt = DateTime::from_timestamp(result.updated_at, 0).unwrap_or_else(Utc::now);
 

@@ -1,11 +1,3 @@
-mod config;
-mod constants;
-mod db;
-mod error;
-mod models;
-mod routes;
-mod security;
-
 use axum::{
     routing::{delete, get, post},
     Router,
@@ -14,16 +6,7 @@ use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use config::Config;
-use db::{open_database, Db};
-use routes::{delete_user, health_check, register_user, retrieve_backup, store_backup};
-
-/// Application state shared across all handlers
-#[derive(Clone)]
-pub struct AppState {
-    pub db: Db,
-    pub config: Config,
-}
+use dailyreps_backup_server::{open_database, routes::*, AppState, Config};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
