@@ -3,6 +3,7 @@ use chrono::Utc;
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
+use crate::constants::ERR_USER_ID_MUST_BE_SHA256;
 use crate::db::tables;
 use crate::error::{AppError, Result};
 use crate::models::{User, UserRecord};
@@ -44,7 +45,7 @@ pub async fn register_user(
     if !User::validate_id(&payload.user_id) {
         tracing::warn!("Invalid user ID format: {}", payload.user_id);
         return Err(AppError::InvalidInput(
-            "User ID must be a valid SHA-256 hash (64 hex characters)".to_string(),
+            ERR_USER_ID_MUST_BE_SHA256.to_string(),
         ));
     }
 

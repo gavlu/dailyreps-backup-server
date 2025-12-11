@@ -138,6 +138,77 @@ async fn body_to_json(body: Body) -> Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+/// Create a POST request with JSON body
+fn make_post_request(uri: &str, body: String) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Create a GET request
+fn make_get_request(uri: &str) -> Request<Body> {
+    Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+/// Create a DELETE request with JSON body
+fn make_delete_request(uri: &str, body: String) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+/// Setup a registered user and return (user_id, storage_key, app)
+async fn setup_registered_user(db: Arc<Database>) -> (String, String, Router) {
+    let app = create_test_app(db.clone());
+    let user_id = generate_user_id();
+    let register_body = json!({ "userId": user_id });
+
+    let response = app
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let storage_key = generate_storage_key(&user_id, "test-password");
+    let app = create_test_app(db);
+    (user_id, storage_key, app)
+}
+
+/// Setup a user with a stored backup and return (user_id, storage_key, data, app)
+async fn setup_user_with_backup(db: Arc<Database>) -> (String, String, String, Router) {
+    let (user_id, storage_key, app) = setup_registered_user(db.clone()).await;
+
+    let data = generate_valid_backup_data();
+    let timestamp = chrono::Utc::now().timestamp();
+    let signature = generate_hmac_signature(&data, TEST_SECRET);
+
+    let backup_body = json!({
+        "userId": user_id,
+        "storageKey": storage_key,
+        "data": data,
+        "signature": signature,
+        "timestamp": timestamp
+    });
+
+    let response = app
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let app = create_test_app(db);
+    (user_id, storage_key, data, app)
+}
+
 // =============================================================================
 // Health Check Tests
 // =============================================================================
@@ -148,15 +219,7 @@ async fn test_health_check_returns_healthy() {
     let db = create_test_db(&temp_dir);
     let app = create_test_app(db);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = app.oneshot(make_get_request("/health")).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -180,14 +243,7 @@ async fn test_register_user_success() {
     let body = json!({ "userId": user_id });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/register", body.to_string()))
         .await
         .unwrap();
 
@@ -208,14 +264,7 @@ async fn test_register_duplicate_user_returns_conflict() {
 
     // First registration
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/register", body.to_string()))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -223,14 +272,7 @@ async fn test_register_duplicate_user_returns_conflict() {
     // Second registration with same user ID
     let app = create_test_app(db);
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/register", body.to_string()))
         .await
         .unwrap();
 
@@ -250,14 +292,7 @@ async fn test_register_invalid_user_id_format() {
     let body = json!({ "userId": "abc123" });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/register", body.to_string()))
         .await
         .unwrap();
 
@@ -274,14 +309,7 @@ async fn test_register_invalid_hex_characters() {
     let body = json!({ "userId": "z".repeat(64) });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/register", body.to_string()))
         .await
         .unwrap();
 
@@ -303,14 +331,10 @@ async fn test_store_backup_success() {
     let register_body = json!({ "userId": user_id });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -331,14 +355,7 @@ async fn test_store_backup_success() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -359,14 +376,10 @@ async fn test_store_backup_invalid_signature() {
     let user_id = generate_user_id();
     let register_body = json!({ "userId": user_id });
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
 
@@ -386,14 +399,7 @@ async fn test_store_backup_invalid_signature() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -410,14 +416,10 @@ async fn test_store_backup_expired_timestamp() {
     let user_id = generate_user_id();
     let register_body = json!({ "userId": user_id });
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
 
@@ -437,14 +439,7 @@ async fn test_store_backup_expired_timestamp() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -473,14 +468,7 @@ async fn test_store_backup_nonexistent_user() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -497,14 +485,10 @@ async fn test_store_backup_invalid_envelope_format() {
     let user_id = generate_user_id();
     let register_body = json!({ "userId": user_id });
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
 
@@ -528,14 +512,7 @@ async fn test_store_backup_invalid_envelope_format() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -556,14 +533,10 @@ async fn test_retrieve_backup_success() {
     let user_id = generate_user_id();
     let register_body = json!({ "userId": user_id });
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
 
@@ -583,14 +556,7 @@ async fn test_retrieve_backup_success() {
     });
 
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -598,10 +564,7 @@ async fn test_retrieve_backup_success() {
     let app = create_test_app(db);
     let uri = format!("/api/backup?userId={}&storageKey={}", user_id, storage_key);
 
-    let response = app
-        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(make_get_request(&uri)).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -620,10 +583,7 @@ async fn test_retrieve_backup_not_found() {
     let storage_key = generate_storage_key(&user_id, "test-password");
     let uri = format!("/api/backup?userId={}&storageKey={}", user_id, storage_key);
 
-    let response = app
-        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(make_get_request(&uri)).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
@@ -637,10 +597,7 @@ async fn test_retrieve_backup_invalid_user_id() {
     let storage_key = "a".repeat(64);
     let uri = format!("/api/backup?userId=invalid&storageKey={}", storage_key);
 
-    let response = app
-        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(make_get_request(&uri)).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
@@ -649,61 +606,17 @@ async fn test_retrieve_backup_invalid_user_id() {
 async fn test_retrieve_backup_wrong_storage_key() {
     let temp_dir = TempDir::new().unwrap();
     let db = create_test_db(&temp_dir);
-    let app = create_test_app(db.clone());
 
-    // Register and store backup
-    let user_id = generate_user_id();
-    let register_body = json!({ "userId": user_id });
-    let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let app = create_test_app(db.clone());
-    let storage_key = generate_storage_key(&user_id, "test-password");
-    let data = generate_valid_backup_data();
-    let timestamp = chrono::Utc::now().timestamp();
-    let signature = generate_hmac_signature(&data, TEST_SECRET);
-
-    let backup_body = json!({
-        "userId": user_id,
-        "storageKey": storage_key,
-        "data": data,
-        "signature": signature,
-        "timestamp": timestamp
-    });
-
-    let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let (user_id, _storage_key, _data, app) = setup_user_with_backup(db.clone()).await;
 
     // Try to retrieve with wrong storage key
-    let app = create_test_app(db);
     let wrong_storage_key = generate_storage_key(&user_id, "wrong-password");
     let uri = format!(
         "/api/backup?userId={}&storageKey={}",
         user_id, wrong_storage_key
     );
 
-    let response = app
-        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(make_get_request(&uri)).await.unwrap();
 
     // Should return NOT_FOUND (we don't reveal if the key exists but is wrong)
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -723,14 +636,10 @@ async fn test_delete_user_success() {
     let user_id = generate_user_id();
     let register_body = json!({ "userId": user_id });
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
 
@@ -750,14 +659,7 @@ async fn test_delete_user_success() {
     });
 
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -774,14 +676,7 @@ async fn test_delete_user_success() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/user")
-                .header("content-type", "application/json")
-                .body(Body::from(delete_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_delete_request("/api/user", delete_body.to_string()))
         .await
         .unwrap();
 
@@ -794,10 +689,7 @@ async fn test_delete_user_success() {
     let app = create_test_app(db);
     let uri = format!("/api/backup?userId={}&storageKey={}", user_id, storage_key);
 
-    let response = app
-        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(make_get_request(&uri)).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
@@ -812,14 +704,10 @@ async fn test_delete_user_invalid_signature() {
     let user_id = generate_user_id();
     let register_body = json!({ "userId": user_id });
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
 
@@ -839,14 +727,7 @@ async fn test_delete_user_invalid_signature() {
     });
 
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -863,14 +744,7 @@ async fn test_delete_user_invalid_signature() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/user")
-                .header("content-type", "application/json")
-                .body(Body::from(delete_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_delete_request("/api/user", delete_body.to_string()))
         .await
         .unwrap();
 
@@ -896,14 +770,7 @@ async fn test_delete_user_not_found() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/api/user")
-                .header("content-type", "application/json")
-                .body(Body::from(delete_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_delete_request("/api/user", delete_body.to_string()))
         .await
         .unwrap();
 
@@ -924,14 +791,10 @@ async fn test_rate_limiting_backup_hourly() {
     let user_id = generate_user_id();
     let register_body = json!({ "userId": user_id });
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
 
@@ -953,14 +816,7 @@ async fn test_rate_limiting_backup_hourly() {
         });
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/backup")
-                    .header("content-type", "application/json")
-                    .body(Body::from(backup_body.to_string()))
-                    .unwrap(),
-            )
+            .oneshot(make_post_request("/api/backup", backup_body.to_string()))
             .await
             .unwrap();
 
@@ -987,14 +843,7 @@ async fn test_rate_limiting_backup_hourly() {
     });
 
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -1015,14 +864,10 @@ async fn test_backup_update_replaces_data() {
     let user_id = generate_user_id();
     let register_body = json!({ "userId": user_id });
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/register")
-                .header("content-type", "application/json")
-                .body(Body::from(register_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request(
+            "/api/register",
+            register_body.to_string(),
+        ))
         .await
         .unwrap();
 
@@ -1043,14 +888,7 @@ async fn test_backup_update_replaces_data() {
     });
 
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body.to_string()))
         .await
         .unwrap();
 
@@ -1069,14 +907,7 @@ async fn test_backup_update_replaces_data() {
     });
 
     let _ = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/backup")
-                .header("content-type", "application/json")
-                .body(Body::from(backup_body2.to_string()))
-                .unwrap(),
-        )
+        .oneshot(make_post_request("/api/backup", backup_body2.to_string()))
         .await
         .unwrap();
 
@@ -1084,10 +915,7 @@ async fn test_backup_update_replaces_data() {
     let app = create_test_app(db);
     let uri = format!("/api/backup?userId={}&storageKey={}", user_id, storage_key);
 
-    let response = app
-        .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = app.oneshot(make_get_request(&uri)).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 

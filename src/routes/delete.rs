@@ -2,11 +2,12 @@ use axum::{extract::State, Json};
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
-use crate::constants::MAX_TIMESTAMP_AGE_SECS;
+use crate::constants::{ERR_INVALID_STORAGE_KEY, ERR_INVALID_USER_ID};
 use crate::db::tables;
 use crate::error::{AppError, Result};
-use crate::models::{BackupRecord, User};
-use crate::security::{apply_pepper, validate_timestamp, verify_hmac};
+use crate::models::{Backup, BackupRecord, User};
+use crate::routes::validate_signed_request;
+use crate::security::apply_pepper;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -47,37 +48,21 @@ pub async fn delete_user(
 ) -> Result<Json<DeleteUserResponse>> {
     // 1. Validate user ID and storage key formats
     if !User::validate_id(&payload.user_id) {
-        return Err(AppError::InvalidInput("Invalid user ID format".to_string()));
+        return Err(AppError::InvalidInput(ERR_INVALID_USER_ID.to_string()));
     }
 
-    if payload.storage_key.len() != 64
-        || !payload.storage_key.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        return Err(AppError::InvalidInput(
-            "Invalid storage key format".to_string(),
-        ));
+    if !Backup::validate_storage_key(&payload.storage_key) {
+        return Err(AppError::InvalidInput(ERR_INVALID_STORAGE_KEY.to_string()));
     }
 
-    // 2. Verify HMAC signature
+    // 2. Verify HMAC signature and timestamp (proves ownership, prevents replay attacks)
     // Use storageKey as the signed data to prove ownership
-    if !verify_hmac(
+    validate_signed_request(
         &payload.storage_key,
         &payload.signature,
+        payload.timestamp,
         &state.config.app_secret_key,
-    ) {
-        tracing::warn!(
-            "Invalid HMAC signature for user deletion: {}",
-            payload.user_id
-        );
-        return Err(AppError::InvalidSignature);
-    }
-
-    // 3. Validate timestamp (prevent replay attacks)
-    if !validate_timestamp(payload.timestamp, MAX_TIMESTAMP_AGE_SECS) {
-        return Err(AppError::InvalidInput(
-            "Timestamp too old or in the future".to_string(),
-        ));
-    }
+    )?;
 
     // Apply server-side pepper to user ID for database lookups
     let peppered_user_id = apply_pepper(&payload.user_id, &state.config.user_id_pepper);
@@ -88,14 +73,14 @@ pub async fn delete_user(
     tokio::task::spawn_blocking(move || -> Result<()> {
         let write_txn = db.begin_write()?;
         {
-            // 4. Verify user exists (using peppered ID)
+            // 3. Verify user exists (using peppered ID)
             let mut users = write_txn.open_table(tables::USERS)?;
             if users.get(peppered_user_id.as_str())?.is_none() {
                 tracing::warn!("Delete attempt for non-existent user (peppered)");
                 return Err(AppError::UserNotFound);
             }
 
-            // 5. Verify the storage key belongs to this user
+            // 4. Verify the storage key belongs to this user
             // This proves they have the password (since storageKey = SHA256(userId + password))
             let backups_table = write_txn.open_table(tables::BACKUPS)?;
             if let Some(backup_bytes) = backups_table.get(storage_key.as_str())? {
@@ -114,30 +99,30 @@ pub async fn delete_user(
             }
             drop(backups_table);
 
-            // 6. Get all backup keys for this user (for cascade delete, using peppered ID)
+            // 5. Get all backup keys for this user (for cascade delete, using peppered ID)
             let mut user_backups = write_txn.open_table(tables::USER_BACKUPS)?;
             let backup_keys: Vec<String> = user_backups
                 .get(peppered_user_id.as_str())?
                 .map(|b| bincode::deserialize(b.value()).unwrap_or_default())
                 .unwrap_or_default();
 
-            // 7. Delete all backups
+            // 6. Delete all backups
             let mut backups = write_txn.open_table(tables::BACKUPS)?;
             for key in &backup_keys {
                 backups.remove(key.as_str())?;
             }
             drop(backups);
 
-            // 8. Delete rate limits (using peppered ID)
+            // 7. Delete rate limits (using peppered ID)
             let mut rate_limits = write_txn.open_table(tables::RATE_LIMITS)?;
             rate_limits.remove(peppered_user_id.as_str())?;
             drop(rate_limits);
 
-            // 9. Delete user_backups index (using peppered ID)
+            // 8. Delete user_backups index (using peppered ID)
             user_backups.remove(peppered_user_id.as_str())?;
             drop(user_backups);
 
-            // 10. Delete user (using peppered ID)
+            // 9. Delete user (using peppered ID)
             users.remove(peppered_user_id.as_str())?;
         }
         write_txn.commit()?;
