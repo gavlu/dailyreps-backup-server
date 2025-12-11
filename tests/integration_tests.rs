@@ -3,15 +3,15 @@
 //! These tests verify the complete request/response cycle for all endpoints.
 
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode},
     routing::{delete, get, post},
-    Router,
 };
 use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
 use redb::Database;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -38,6 +38,7 @@ fn test_config() -> dailyreps_backup_server::Config {
         environment: "test".to_string(),
         app_secret_key: TEST_SECRET.to_string(),
         admin_secret_key: None,
+        log_requests: false,
     }
 }
 
@@ -882,6 +883,7 @@ fn test_config_with_admin() -> dailyreps_backup_server::Config {
         environment: "test".to_string(),
         app_secret_key: TEST_SECRET.to_string(),
         admin_secret_key: Some(TEST_ADMIN_SECRET.to_string()),
+        log_requests: false,
     }
 }
 

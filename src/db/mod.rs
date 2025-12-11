@@ -15,13 +15,13 @@ pub fn open_database(path: impl AsRef<Path>) -> Result<Db, RedbError> {
     tracing::info!("Opening database at: {:?}", path.as_ref());
 
     // Create parent directory if it doesn't exist
-    if let Some(parent) = path.as_ref().parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                tracing::error!("Failed to create database directory: {}", e);
-                RedbError::Io(e)
-            })?;
-        }
+    if let Some(parent) = path.as_ref().parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            tracing::error!("Failed to create database directory: {}", e);
+            RedbError::Io(e)
+        })?;
     }
 
     let db = Database::create(path)?;

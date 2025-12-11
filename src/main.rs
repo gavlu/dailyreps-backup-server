@@ -1,12 +1,13 @@
 use axum::{
-    routing::{delete, get, post},
     Router,
+    routing::{delete, get, post},
 };
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use dailyreps_backup_server::{open_database, routes::*, AppState, Config};
+use dailyreps_backup_server::{AppState, Config, open_database, routes::*};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -59,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build router
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health", get(health_check))
         .route("/api/register", post(register_user))
         .route("/api/backup", post(store_backup).get(retrieve_backup))
@@ -67,6 +68,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/stats", get(admin_stats))
         .layer(cors)
         .with_state(state);
+
+    // Add request logging if enabled
+    if config.log_requests {
+        tracing::info!("Request logging enabled");
+        app = app.layer(TraceLayer::new_for_http());
+    }
 
     // Start server
     let addr: SocketAddr = config.server_address().parse()?;

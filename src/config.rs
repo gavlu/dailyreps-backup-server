@@ -14,6 +14,7 @@ pub struct Config {
     pub environment: String,
     pub app_secret_key: String,
     pub admin_secret_key: Option<String>,
+    pub log_requests: bool,
 }
 
 impl Config {
@@ -64,6 +65,10 @@ impl Config {
 
         let admin_secret_key = env::var("ADMIN_SECRET_KEY").ok();
 
+        let log_requests = env::var("LOG_REQUESTS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
         Ok(Config {
             server_host,
             server_port,
@@ -76,6 +81,7 @@ impl Config {
             environment,
             app_secret_key,
             admin_secret_key,
+            log_requests,
         })
     }
 
